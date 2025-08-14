@@ -141,7 +141,8 @@ async def comps_suggest(
     return top_comps
 
 
-@app.post("/comps/search", tags=["comps"])
+# Support both GET and POST requests for comps search
+@app.api_route("/comps/search", methods=["GET", "POST"], tags=["comps"])
 async def comps_search(
     lat: Optional[float] = None,
     lng: Optional[float] = None,

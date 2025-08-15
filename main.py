@@ -1,68 +1,105 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
+import os
 
 # Import advanced comps scoring classes and helpers
 from comps_scoring import Property, find_comps, default_weights
 
-# Initialize FastAPI application
+try:
+    # Import the Supabase client if available.  This package should be installed
+    # via requirements.txt as ``supabase-py``.  We wrap this in a try/except so
+    # that the API can still start even if the library is missing (for example
+    # during local development before dependencies are installed).
+    from supabase import create_client, Client  # type: ignore
+except Exception:
+    create_client = None  # type: ignore
+    Client = None  # type: ignore
+
 app = FastAPI(title="Casae API", version="0.1.0")
 
-# Example comps dataset with year built and lot size (sqft)
+# -----------------------------------------------------------------------------
+# Supabase configuration
+#
+# We create a Supabase client using environment variables.  If the required
+# variables are not present or the client cannot be created, ``supabase`` will
+# remain ``None`` and the API will fall back to the built‑in sample comps
+# dataset.  To query your real properties table, set ``SUPABASE_URL`` and
+# ``SUPABASE_SERVICE_ROLE_KEY`` (or ``SUPABASE_KEY``) in your deployment
+# environment.
+# -----------------------------------------------------------------------------
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+supabase: Optional["Client"] = None
+if create_client is not None and SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)  # type: ignore
+    except Exception:
+        supabase = None
+
+# -----------------------------------------------------------------------------
+# Sample comps dataset
+# -----------------------------------------------------------------------------
 comps_data = [
     {
         "id": 1,
         "address": "123 Main St",
-        "price": 300000,
+        "price": 300_000,
         "beds": 3,
         "baths": 2,
-        "sqft": 1500,
+        "sqft": 1_500,
         "year_built": 1995,
-        "lot_size": 6000,
+        "lot_size": 6_000,
     },
     {
         "id": 2,
         "address": "456 Oak Ave",
-        "price": 320000,
+        "price": 320_000,
         "beds": 4,
         "baths": 3,
-        "sqft": 1800,
+        "sqft": 1_800,
         "year_built": 2000,
-        "lot_size": 6500,
+        "lot_size": 6_500,
     },
     {
         "id": 3,
         "address": "789 Pine Rd",
-        "price": 280000,
+        "price": 280_000,
         "beds": 3,
         "baths": 2,
-        "sqft": 1400,
+        "sqft": 1_400,
         "year_built": 1990,
-        "lot_size": 5500,
+        "lot_size": 5_500,
     },
     {
         "id": 4,
         "address": "101 Cedar Blvd",
-        "price": 310000,
+        "price": 310_000,
         "beds": 4,
         "baths": 2,
-        "sqft": 1600,
+        "sqft": 1_600,
         "year_built": 1980,
-        "lot_size": 6200,
+        "lot_size": 6_200,
     },
     {
         "id": 5,
         "address": "202 Maple St",
-        "price": 295000,
+        "price": 295_000,
         "beds": 3,
         "baths": 2,
-        "sqft": 1200,
+        "sqft": 1_200,
         "year_built": 1985,
-        "lot_size": 5000,
+        "lot_size": 5_000,
     },
 ]
 
-# CORS configuration will be overridden via environment variables in deployment
+# -----------------------------------------------------------------------------
+# CORS configuration
+#
+# In production, the allowed origins will typically be configured via
+# environment variables or deployment settings.  During development, we allow
+# all origins so that local frontends can make requests to this API.
+# -----------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -92,13 +129,15 @@ def compute_similarity(
     year_built: Optional[int],
     lot_size: Optional[int],
 ) -> float:
-    """Compute a similarity score based on weighted differences.
-    Scores are higher when the comp is closer to the subject parameters.
+    """
+    Compute a similarity score based on weighted differences.  This helper
+    function is used by the `/comps/suggest` endpoint.  Scores are higher
+    when the comp is closer to the subject parameters.
     """
     score = 0.0
     total_weight = 0.0
 
-    def add_component(comp_val: float, target_val: Optional[float], weight: float):
+    def add_component(comp_val: float, target_val: Optional[float], weight: float) -> None:
         nonlocal score, total_weight
         if target_val is not None and target_val > 0:
             diff = abs(comp_val - target_val)
@@ -129,8 +168,9 @@ async def comps_suggest(
     n: int = 5,
 ) -> List[dict]:
     """
-    Suggest comparable properties sorted by similarity score.
-    The higher the score, the more similar the comp is to the subject property.
+    Suggest comparable properties sorted by similarity score using the in‑memory
+    sample data.  The higher the score, the more similar the comp is to the
+    subject parameters.
     """
     comps_with_scores = [
         (comp, compute_similarity(comp, price, beds, baths, sqft, year_built, lot_size))
@@ -141,7 +181,6 @@ async def comps_suggest(
     return top_comps
 
 
-# Support both GET and POST requests for comps search
 @app.api_route("/comps/search", methods=["GET", "POST"], tags=["comps"])
 async def comps_search(
     lat: Optional[float] = None,
@@ -156,9 +195,15 @@ async def comps_search(
 ) -> Dict[str, List[Dict]]:
     """
     Search for comparable properties using the advanced comps scoring algorithm.
-    Provide subject property details and return the top n comps with similarity scores.
+    Subject property details are provided via query parameters.  If a Supabase
+    client is configured and available, this function will query the ``properties``
+    table for candidate comps.  Otherwise it will fall back to the built‑in
+    sample dataset.
     """
-    # Construct the subject Property object; default to zero or None where data is missing
+    # -------------------------------------------------------------------------
+    # Construct the subject ``Property``.  If fields are missing, default to
+    # zero or None as appropriate.
+    # -------------------------------------------------------------------------
     subject = Property(
         id="subject",
         lat=lat or 0.0,
@@ -176,35 +221,107 @@ async def comps_search(
         market_index_geo=None,
     )
 
-    # Convert comps_data entries to Property objects
     comps_list: List[Property] = []
-    for entry in comps_data:
-        comp = Property(
-            id=str(entry.get("id")),
-            lat=entry.get("lat", 0.0),
-            lng=entry.get("lng", 0.0),
-            property_type="SFR",
-            living_sqft=entry.get("sqft", 0.0),
-            lot_sqft=entry.get("lot_size"),
-            beds=entry.get("beds"),
-            baths=entry.get("baths"),
-            year_built=entry.get("year_built"),
-            condition_rating=None,
-            features=set(),
-            sale_date=None,
-            raw_price=entry.get("price"),
-            market_index_geo=None,
-        )
-        comps_list.append(comp)
 
-    # Use advanced comps scoring to find the most similar comps
-    scored = find_comps(subject, comps_list, n, weights=default_weights)
+    # -------------------------------------------------------------------------
+    # Attempt to fetch comps from Supabase.  We wrap this in a conditional so
+    # that if the client or environment variables are missing the code still
+    # executes and falls back gracefully to the local sample data.  We also
+    # surround the query with try/except to catch any runtime errors from the
+    # Supabase client.
+    # -------------------------------------------------------------------------
+    if supabase is not None:
+        try:
+            query = supabase.table("properties").select("*")
+            # Apply basic filters when provided.  Additional filtering logic
+            # (such as lat/lng radius or price windows) can be added later.
+            if beds is not None:
+                query = query.eq("beds", beds)
+            if baths is not None:
+                query = query.eq("baths", baths)
+            if sqft is not None:
+                # The database may store living area under ``living_sqft`` or ``sqft``.
+                query = query.eq("living_sqft", sqft)
+            # Execute the query.  ``execute()`` returns an object whose
+            # ``data`` attribute contains the result list.
+            response = query.execute()
+            data = None
+            # ``supabase-py`` returns ``data`` either as an attribute or in the
+            # returned dictionary depending on the version.
+            if hasattr(response, "data"):
+                data = response.data  # type: ignore[attr-defined]
+            elif isinstance(response, dict):
+                data = response.get("data")
+            if data:
+                for entry in data:
+                    comps_list.append(
+                        Property(
+                            id=str(entry.get("id")),
+                            lat=entry.get("lat", 0.0),
+                            lng=entry.get("lng", 0.0),
+                            property_type=entry.get("property_type", "SFR"),
+                            living_sqft=entry.get("living_sqft")
+                            or entry.get("sqft", 0.0)
+                            or 0.0,
+                            lot_sqft=entry.get("lot_size"),
+                            beds=entry.get("beds") or 0,
+                            baths=entry.get("baths") or 0,
+                            year_built=entry.get("year_built"),
+                            condition_rating=entry.get("condition_rating"),
+                            features=set(entry.get("features"))
+                            if entry.get("features")
+                            else set(),
+                            sale_date=None,
+                            raw_price=entry.get("raw_price") or entry.get("price"),
+                            market_index_geo=None,
+                        )
+                    )
+        except Exception:
+            # If anything goes wrong (e.g. network error, invalid response),
+            # ignore Supabase results and fall back to the local sample data.
+            comps_list = []
 
-    # Build response: convert dataclass to dict and include similarity score
+    # -------------------------------------------------------------------------
+    # If Supabase returned no comps or the client was unavailable, use the
+    # built‑in sample data to ensure the endpoint still responds.  This helps
+    # development and acts as a last‑resort fallback in production if the
+    # database is unreachable.
+    # -------------------------------------------------------------------------
+    if not comps_list:
+        for entry in comps_data:
+            comps_list.append(
+                Property(
+                    id=str(entry.get("id")),
+                    lat=entry.get("lat", 0.0),
+                    lng=entry.get("lng", 0.0),
+                    property_type="SFR",
+                    living_sqft=entry.get("sqft", 0.0),
+                    lot_sqft=entry.get("lot_size"),
+                    beds=entry.get("beds"),
+                    baths=entry.get("baths"),
+                    year_built=entry.get("year_built"),
+                    condition_rating=None,
+                    features=set(),
+                    sale_date=None,
+                    raw_price=entry.get("price"),
+                    market_index_geo=None,
+                )
+            )
+
+    # -------------------------------------------------------------------------
+    # Score the candidate comps using the advanced scoring algorithm.  We use an
+    # empty ``filters`` dictionary (no hard filters) and an empty market index.
+    # The ``return_limit`` parameter ensures we only take the top ``n`` comps.
+    # -------------------------------------------------------------------------
+    filters: Dict[str, float] = {}
+    market_index: Dict[Tuple[str, str], float] = {}
+    _, scored = find_comps(subject, comps_list, filters, default_weights, market_index, n)
+
     results: List[Dict] = []
     for comp, score in scored:
         comp_dict = comp.__dict__.copy()
-        comp_dict["features"] = list(comp_dict["features"])
+        # Convert the features set back to a list for JSON serialization
+        comp_dict["features"] = list(comp_dict.get("features", []))
         comp_dict["similarity"] = score
         results.append(comp_dict)
 

@@ -31,3 +31,6 @@ docker run -p 8000:8000 casae-api
 
 # redeploy trigger
 # redeploy trigger again
+
+
+# redeploy trigger third time

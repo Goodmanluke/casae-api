@@ -28,3 +28,5 @@ Build and run the API with Docker:
 docker build -t casae-api .
 docker run -p 8000:8000 casae-api
 ```
+
+# redeploy trigger

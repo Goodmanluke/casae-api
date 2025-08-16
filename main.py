@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Tuple
 import os
+from pydantic import BaseModel
+from datetime import datetime
 
 # Import advanced comps scoring classes and helpers
 from comps_scoring import Property, find_comps, default_weights
@@ -326,3 +328,62 @@ async def comps_search(
         results.append(comp_dict)
 
     return {"results": results}
+
+# -----------------------------------------------------------------------------
+# Saved searches endpoints
+#
+# These endpoints allow the frontend to save and list users' saved search
+# criteria.  The ``/searches/save`` endpoint accepts a POST request with
+# ``user_id`` and ``params`` and stores the search in the ``saved_searches``
+# table.  The ``/searches/list`` endpoint accepts a GET request with a
+# ``user_id`` query parameter and returns all saved searches for that user.
+# -----------------------------------------------------------------------------
+
+class SaveSearchRequest(BaseModel):
+    user_id: str
+    params: Dict
+
+@app.post("/searches/save", tags=["searches"])
+async def save_search(request: SaveSearchRequest) -> Dict[str, str]:
+    """
+    Save a search for the given user.  Requires Supabase to be configured.
+    
+    Parameters:
+      user_id: identifier of the user saving the search
+      params: dictionary of search parameters
+
+    Returns a status object or an error message if Supabase is not available or
+    the insert fails.
+    """
+    if supabase is None:
+        return {"error": "supabase not configured"}
+    try:
+        payload = {
+            "user_id": request.user_id,
+            "params": request.params,
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        supabase.table("saved_searches").insert(payload).execute()
+        return {"status": "success"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/searches/list", tags=["searches"])
+async def list_saved_searches(user_id: str) -> Dict[str, List[Dict]]:
+    """
+    List all saved searches for a given user.  If Supabase is not available
+    returns an empty list.
+    """
+    if supabase is None:
+        return {"results": []}
+    try:
+        query = supabase.table("saved_searches").select("*").eq("user_id", user_id)
+        response = query.execute()
+        data: Optional[List[Dict]] = None
+        if hasattr(response, "data"):
+            data = response.data  # type: ignore[attr-defined]
+        elif isinstance(response, dict):
+            data = response.get("data")
+        return {"results": data or []}
+    except Exception:
+        return {"results": []}

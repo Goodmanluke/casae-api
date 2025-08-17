@@ -138,23 +138,24 @@ def _renovations_uplift(items: List[str]) -> float:
     weights = {"kitchen": 0.06, "bath": 0.05, "flooring": 0.02, "roof": 0.01, "dock": 0.03, "hvac": 0.01}
     return sum(weights.get(item.lower(), 0.0) for item in items)
 
-def _additions_uplift(add_beds: int, add_baths: float, add_sqft: int, comps: List[Tuple[Property, float]]) -> float:
-    """Return the percentage uplift from adding bedrooms, bathrooms, and square footage."""
-    if not comps:
-        return 0.0
-    # Compute average price per square foot from comps
-    total_price = 0.0
-    total_weight = 0.0
-    for comp, score in comps:
-        if comp.living_sqft and comp.raw_price:
-            ppsf = comp.raw_price / max(1.0, comp.living_sqft)
-            total_price += ppsf * score
-            total_weight += score
-    avg_ppsf = (total_price / total_weight) if total_weight > 0 else 0.0
-    sqft_uplift = (add_sqft * avg_ppsf) / max(1.0, sum(comp.raw_price for comp, _ in comps) / len(comps))
-    bed_uplift = 0.03 * add_beds
-    bath_uplift = 0.02 * add_baths
-    return sqft_uplift + bed_uplift + bath_uplift
+def _additions_uplift(add_beds: int, add_baths: int, add_sqft: int, comps: list, dock_length: int = 0) -> float:
+    uplift = 0.0
+
+    # Bedrooms / baths
+    uplift += 0.025 * max(0, int(add_beds or 0))
+    uplift += 0.020 * max(0, int(add_baths or 0))
+
+    # Sqft
+    if add_sqft and add_sqft > 0:
+        uplift += min(0.10, 0.00006 * add_sqft)
+
+    # Dock length
+    if dock_length and dock_length > 0:
+        dock_uplift = 0.001 * dock_length   # 0.1% per foot
+        uplift += min(dock_uplift, 0.03)    # cap 3%
+
+    return uplift
+
 
 def _to_comp_model(comp: Property, similarity: float) -> Comp:
     """Convert internal Property to the API Comp model."""
@@ -598,7 +599,10 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
     uplift = 0.0
     uplift += _condition_uplift(payload.condition)
     uplift += _renovations_uplift(payload.renovations or [])
-    uplift += _additions_uplift(payload.add_beds, payload.add_baths, payload.add_sqft, comps)
+   uplift += _additions_uplift(
+    payload.add_beds, payload.add_baths, payload.add_sqft, comps, getattr(payload, "dock_length", 0) or 0
+)
+
 
     # Cap uplift at 35%
     uplift = min(uplift, 0.35)

@@ -1,7 +1,9 @@
+
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import 
 from typing import Optional, List, Dict, Tuple, Any
 import os
+import httpx
 from pydantic import BaseModel
 from datetime import datetime
 from uuid import uuid4
@@ -721,3 +723,24 @@ async def generate_pdf(cma_run_id: str) -> StreamingResponse:
     return StreamingResponse(BytesIO(pdf_bytes), media_type="application/pdf", headers={
         "Content-Disposition": f"attachment; filename={filename}"
     })
+    
+@app.get("/vendor/rentcast/value", tags=["vendor", "rentcast"])
+async def rentcast_value(address: str, beds: Optional[int] = None, baths: Optional[float] = None, sqft: Optional[int] = None):
+    """
+    Call RentCast AVM to retrieve property value estimate and comparables.
+    """
+    api_key = os.getenv("RENTCAST_API_KEY")
+    if not api_key:
+        return {"error": "RENTCAST_API_KEY not configured"}
+    params = {"address": address}
+    if beds is not None:
+        params["beds"] = beds
+    if baths is not None:
+        params["baths"] = baths
+    if sqft is not None:
+        params["sqft"] = sqft
+    url = "https://api.rentcast.io/v1/avm/value"
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, params=params, headers={"X-Api-Key": api_key})
+        return response.json()
+

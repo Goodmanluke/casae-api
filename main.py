@@ -21,6 +21,9 @@ except Exception:
 
 # Import CMA schemas
 from cma_models import Subject, CMAInput, AdjustmentInput, Comp, CMAResponse
+from fastapi.responses import StreamingResponse
+from io import BytesIO
+from pdf_utils import create_cma_pdf
 
 app = FastAPI(title="Casae API", version="0.2.0")
 
@@ -693,12 +696,24 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
 
 
 @app.post("/pdf", tags=["cma"])
-async def generate_pdf(cma_run_id: str) -> Dict[str, str]:
+async def generate_pdf(cma_run_id: str) -> StreamingResponse:
     """
-    Generate a PDF report for the given CMA run.
-    This is a stub implementation that returns a placeholder URL.
-    In production, this should render an HTML template and convert it to PDF.
+    Generate and return a PDF report for the given CMA run.
+
+    This endpoint looks up the CMA run stored in memory and generates a
+    simple PDF that includes the subject's estimated value and the list
+    of comparable properties.  The PDF is returned directly in the
+    response as a streaming download.  If the requested run ID does
+    not exist, a 404 PDF is returned.
     """
-    # For now we simply return a URL that includes the run ID.  A real implementation
-    # would upload a generated PDF to a storage bucket and return a signed link.
-    return {"url": f"https://example.com/cma/{cma_run_id}.pdf"}
+    cma_run = _load_cma_run(cma_run_id)
+    if not cma_run:
+        # If the run is missing, return a tiny PDF with a "not found" message
+        empty_pdf = create_cma_pdf(cma_run_id, {"subject": None, "estimate": 0.0, "comps": []})
+        return StreamingResponse(BytesIO(empty_pdf), media_type="application/pdf", status_code=404)
+    # Build the PDF bytes using our utility
+    pdf_bytes = create_cma_pdf(cma_run_id, cma_run)
+    filename = f"cma_{cma_run_id}.pdf"
+    return StreamingResponse(BytesIO(pdf_bytes), media_type="application/pdf", headers={
+        "Content-Disposition": f"attachment; filename={filename}"
+    })

@@ -729,18 +729,59 @@ async def rentcast_value(address: str, beds: Optional[int] = None, baths: Option
     """
     Call RentCast AVM to retrieve property value estimate and comparables.
     """
-    api_key = os.getenv("RENTCAST_API_KEY")
-    if not api_key:
-        return {"error": "RENTCAST_API_KEY not configured"}
-    params = {"address": address}
-    if beds is not None:
-        params["beds"] = beds
-    if baths is not None:
-        params["baths"] = baths
-    if sqft is not None:
-        params["sqft"] = sqft
-    url = "https://api.rentcast.io/v1/avm/value"
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, params=params, headers={"X-Api-Key": api_key})
+    rentcast_api_key = os.getenv("RENTCAST_API_KEY")
+if rentcast_api_key:
+    params = {
+        "address": s.address,
+        "beds": s.beds or "",
+        "baths": s.baths or "",
+        "squareFootage": s.sqft or "",
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.rentcast.io/v1/avm/value",
+                params=params,
+                headers={"X-Api-Key": rentcast_api_key},
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            rc_price = data.get("price")
+            rc_comps = data.get("comparables", [])
+            if rc_price and rc_comps:
+                # map comparables into your Property model
+                comps_list: List[Property] = []
+                for comp in rc_comps:
+                    comps_list.append(
+                        Property(
+                            address=comp.get("formattedAddress"),
+                            lat=comp.get("latitude"),
+                            lng=comp.get("longitude"),
+                            beds=comp.get("bedrooms"),
+                            baths=comp.get("bathrooms"),
+                            sqft=comp.get("squareFootage"),
+                            raw_price=comp.get("price"),
+                            # add other fields as needed
+                        )
+                    )
+                estimate = round(rc_price or 0)
+                cma_run_id = str(uuid4())
+                await _save_cma_run(
+                    s,
+                    cma_run_id,
+                    {"source": "rentcast"},
+                    comps_list,
+                    estimate,
+                    "Estimate from RentCast AVM",
+                )
+                return CMAResponse(
+                    estimate=estimate,
+                    comps=comps_list,
+                    explanation="Estimate from RentCast AVM.",
+                    cma_run_id=cma_run_id,
+                )
+    except Exception:
+        pass
+
         return response.json()
 

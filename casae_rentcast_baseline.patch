@@ -1,0 +1,82 @@
+*** Begin Patch
+*** Update File: main.py
+@@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
+         subject_prop = Property(
+@@
+         market_index_geo=None,
+     )
+
++    # Use RentCast AVM if API key available to compute estimate and comps.
++    # If a valid API key is present in the environment, we make a request to
++    # RentCast's AVM endpoint using the subject address and basic specs. When
++    # successful, we construct a comps list from the returned comparables,
++    # persist a new CMA run, and return early with that estimate and comps.
++    rentcast_api_key = os.getenv("RENTCAST_API_KEY")
++    if rentcast_api_key:
++        params = {
++            "address": s.address,
++            "beds": s.beds or "",
++            "baths": s.baths or "",
++            "squareFootage": s.sqft or "",
++        }
++        try:
++            async with httpx.AsyncClient() as client:
++                resp = await client.get(
++                    "https://api.rentcast.io/v1/avm/value",
++                    params=params,
++                    headers={"X-Api-Key": rentcast_api_key},
++                )
++            if resp.status_code == 200:
++                data = resp.json()
++                rc_price = data.get("price")
++                rc_comps = data.get("comparables", []) or []
++                if rc_price and rc_comps:
++                    comps_list: List[Property] = []
++                    for comp in rc_comps:
++                        comps_list.append(
++                            Property(
++                                id=str(comp.get("id", "rentcast")),
++                                address=comp.get("formattedAddress") or "",
++                                lat=comp.get("latitude"),
++                                lng=comp.get("longitude"),
++                                property_type="SFR",
++                                living_sqft=comp.get("squareFootage") or 0.0,
++                                lot_sqft=comp.get("lotSize"),
++                                beds=comp.get("bedrooms"),
++                                baths=comp.get("bathrooms"),
++                                year_built=comp.get("yearBuilt"),
++                                condition_rating=None,
++                                features=set(),
++                                sale_date=None,
++                                raw_price=comp.get("price"),
++                                market_index_geo=None,
++                            )
++                        )
++                    estimate = round(rc_price or 0)
++                    cma_run_id = str(uuid4())
++                    # Persist the CMA run and comps for audit
++                    await _save_cma_run(
++                        s,
++                        cma_run_id,
++                        {"source": "rentcast"},
++                        comps_list,
++                        estimate,
++                        "Estimate from RentCast AVM.",
++                    )
++                    return CMAResponse(
++                        estimate=estimate,
++                        comps=comps_list,
++                        explanation="Estimate from RentCast AVM.",
++                        cma_run_id=cma_run_id,
++                    )
++        except Exception:
++            # In case of any error from RentCast, continue with internal comps logic
++            pass
+@@
+-    # Prepare candidate comps (reuse logic f
+-    rom comps_search)
+-    comps_List[Property] = []
++    # Prepare candidate comps (reuse logic from comps_search)
++    from comps_search import comps_search
++    comps_list: List[Property] = []
+*** End Patch

@@ -500,7 +500,8 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
         raw_price=None,
         market_index_geo=None,
     )
-    # Use RentCast AVM if API key available to compute estimate and comps.
+
+    # --- RentCast AVM path ---
     rentcast_api_key = os.getenv("RENTCAST_API_KEY")
     if rentcast_api_key:
         params = {
@@ -542,33 +543,70 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
                                 market_index_geo=None,
                             )
                         )
+
                     estimate = round(rc_price or 0)
+
+                    # --- AI: rank comps + reasoning ---
+                    subject_dict = {
+                        "address": getattr(s, "address", ""),
+                        "lat": s.lat,
+                        "lng": s.lng,
+                        "beds": s.beds,
+                        "baths": s.baths,
+                        "living_sqft": s.sqft,
+                        "lot_sqft": s.lot_sqft,
+                        "year_built": s.year_built,
+                        "avm_value": estimate,
+                    }
+                    comp_dicts = []
+                    for c in comps_list:
+                        comp_dicts.append({
+                            "id": getattr(c, "id", "rc"),
+                            "address": getattr(c, "address", ""),
+                            "lat": c.lat,
+                            "lng": c.lng,
+                            "property_type": c.property_type,
+                            "living_sqft": c.living_sqft,
+                            "lot_sqft": c.lot_sqft,
+                            "beds": c.beds,
+                            "baths": c.baths,
+                            "year_built": c.year_built,
+                            "raw_price": c.raw_price,
+                        })
+
+                    ranked = await rank_comparables(subject_dict, comp_dicts)
+                    explanation = ranked.get("reasoning", "Estimate from RentCast AVM.")
+
+                    # Optional: reorder comps by AI-suggested order
+                    ordered_ids = [d.get("id") for d in (ranked.get("comps") or [])]
+                    if ordered_ids:
+                        id2comp = {getattr(c, "id", str(i)): c for i, c in enumerate(comps_list)}
+                        comps_list = [id2comp[i] for i in ordered_ids if i in id2comp] or comps_list
+
                     cma_run_id = str(uuid4())
-                    # Persist the CMA run and comps for audit
                     await _save_cma_run(
                         s,
                         cma_run_id,
                         {"source": "rentcast"},
                         comps_list,
                         estimate,
-                        "Estimate from RentCast AVM.",
+                        explanation,
                     )
                     return CMAResponse(
                         estimate=estimate,
                         comps=comps_list,
-                        explanation="Estimate from RentCast AVM.",
+                        explanation=explanation,
                         cma_run_id=cma_run_id,
                     )
         except Exception:
             # In case of any error from RentCast, continue with internal comps logic
             pass
 
-    # Prepare candidate comps (reuse logic from comps_search)
+    # --- Supabase / fallback comps path ---
     comps_list: List[Property] = []
     if supabase is not None:
         try:
             query = supabase.table("properties").select("*")
-            # Example: filter by beds and baths similar to subject (±1)
             query = query.eq("beds", s.beds)
             response = query.execute()
             data = None
@@ -620,10 +658,17 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
                 )
             )
 
-    # Use advanced comps scoring engine
+    # --- Advanced comps scoring engine ---
     filters: Dict[str, float] = {}
     market_index: Dict[Tuple[str, str], float] = {}
-    _, scored = find_comps(subject_prop, comps_list, filters, default_weights, market_index, payload.rules.get("n", 8) if isinstance(payload.rules.get("n", None), int) else 8)
+    _, scored = find_comps(
+        subject_prop,
+        comps_list,
+        filters,
+        default_weights,
+        market_index,
+        payload.rules.get("n", 8) if isinstance(payload.rules.get("n", None), int) else 8
+    )
 
     # Compute estimate as similarity-weighted average of raw prices
     total_price = 0.0
@@ -635,15 +680,55 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
             total_weight += weight
     estimate = round(total_price / total_weight, 0) if total_weight > 0 else 0.0
 
+    # --- AI reasoning + optional reorder ---
+    subject_dict = {
+        "address": getattr(s, "address", ""),
+        "lat": s.lat,
+        "lng": s.lng,
+        "beds": s.beds,
+        "baths": s.baths,
+        "living_sqft": s.sqft,
+        "lot_sqft": s.lot_sqft,
+        "year_built": s.year_built,
+        "avm_value": estimate,
+    }
+    comp_dicts = []
+    for comp, score in scored:
+        comp_dicts.append({
+            "id": getattr(comp, "id", ""),
+            "address": getattr(comp, "address", ""),
+            "lat": comp.lat,
+            "lng": comp.lng,
+            "property_type": comp.property_type,
+            "living_sqft": comp.living_sqft,
+            "lot_sqft": comp.lot_sqft,
+            "beds": comp.beds,
+            "baths": comp.baths,
+            "year_built": comp.year_built,
+            "raw_price": comp.raw_price,
+        })
+
+    ranked2 = await rank_comparables(subject_dict, comp_dicts)
+    explanation2 = ranked2.get("reasoning", "Estimate based on similarity-weighted top comps.")
+
+    # Optional reorder of scored comps
+    ordered_ids2 = [d.get("id") for d in (ranked2.get("comps") or [])]
+    if ordered_ids2:
+        id2tuple = {getattr(comp, "id", str(i)): (comp, score) for i, (comp, score) in enumerate(scored)}
+        new_scored = [id2tuple[i] for i in ordered_ids2 if i in id2tuple]
+        if new_scored:
+            scored = new_scored
+
     run_id = str(uuid4())
     _save_cma_run(run_id, subject_prop, scored, estimate, baseline=True)
 
     return CMAResponse(
         estimate=estimate,
         comps=[_to_comp_model(comp, score) for comp, score in scored],
-        explanation="Estimate based on similarity-weighted top comps.",
+        explanation=explanation2,
         cma_run_id=run_id,
     )
+
 
 
 @app.post("/cma/adjust", response_model=CMAResponse, tags=["cma"])

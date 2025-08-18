@@ -1,5 +1,5 @@
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Tuple, Any
 import os
@@ -850,66 +850,12 @@ async def generate_pdf(cma_run_id: str) -> StreamingResponse:
     })
     
 @app.get("/vendor/rentcast/value", tags=["vendor", "rentcast"])
-async def rentcast_value(address: str, beds: Optional[int] = None, baths: Optional[float] = None, sqft: Optional[int] = None):
-    """
-    Call RentCast AVM to retrieve property value estimate and comparables.
-    """
-    rentcast_api_key = os.getenv("RENTCAST_API_KEY")
-if rentcast_api_key:
-    params = {
-        "address": s.address,
-        "beds": s.beds or "",
-        "baths": s.baths or "",
-        "squareFootage": s.sqft or "",
-    }
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://api.rentcast.io/v1/avm/value",
-                params=params,
-                headers={"X-Api-Key": rentcast_api_key},
-            )
-        if resp.status_code == 200:
-            data = resp.json()
-            rc_price = data.get("price")
-            rc_comps = data.get("comparables", [])
-            if rc_price and rc_comps:
-                # map comparables into your Property model
-                comps_list: List[Property] = []
-                for comp in rc_comps:
-                    comps_list.append(
-                        Property(
-                            address=comp.get("formattedAddress"),
-                            lat=comp.get("latitude"),
-                            lng=comp.get("longitude"),
-                            beds=comp.get("bedrooms"),
-                            baths=comp.get("bathrooms"),
-                            sqft=comp.get("squareFootage"),
-                            raw_price=comp.get("price"),
-                            # add other fields as needed
-                        )
-                    )
-                estimate = round(rc_price or 0)
-                cma_run_id = str(uuid4())
-                await _save_cma_run(
-                    s,
-                    cma_run_id,
-                    {"source": "rentcast"},
-                    comps_list,
-                    estimate,
-                    "Estimate from RentCast AVM",
-                )
-                return CMAResponse(
-                    estimate=estimate,
-                    comps=comps_list,
-                    explanation="Estimate from RentCast AVM.",
-                    cma_run_id=cma_run_id,
-                )
-    except Exception:
-        pass
-
-        return response.json()
-
+async def rentcast_value(address: str, beds: Optional[int] = None, baths: Optional[float] = None, sqft: Optional[int] = None) -> None:
+    """Temporarily disabled endpoint for RentCast AVM."""
+    # This endpoint is currently not implemented. It previously called the RentCast API
+    # to retrieve an AVM value and comparables. Until it is properly implemented,
+    # return a 501 Not Implemented response.
+    raise HTTPException(status_code=501, detail="Endpoint disabled")
 
 class SummaryRequest(BaseModel):
     """Request body for generating a CMA summary narrative."""

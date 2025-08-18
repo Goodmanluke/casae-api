@@ -68,14 +68,16 @@ comps_data = [
         "address": "456 Oak Ave",
         "price": 320_000,
         "beds": 4,
-        "baths": 3,
+        "baths": 
+        3,
         "sqft": 1_800,
         "year_built": 2000,
         "lot_size": 6_500,
     },
     {
         "id": 3,
-        "address": "789 Pine Rd",
+        "address": "789
+        Pine Rd",
         "price": 280_000,
         "beds": 3,
         "baths": 2,
@@ -213,6 +215,7 @@ def compute_similarity(
     """
     Compute a similarity score based on weighted differences.  This helper
     function is used by the `/comps/suggest` endpoint.  Scores are higher
+ 
     when the comp is closer to the subject parameters.
     """
     score = 0.0

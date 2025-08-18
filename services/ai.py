@@ -3,7 +3,10 @@ import json
 from typing import Any, Dict, List, Optional
 
 import asyncio
-import httpx
+try::
+    import httpx  # type: ignore
+except Exception:
+    httpx = None  # type: ignore
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = "gpt-4o-mini"
@@ -16,7 +19,7 @@ async def _call_openai(messages: List[Dict[str, str]], want_json: bool = False, 
     Returns the assistant message content or None on failure.
     Uses JSON mode when want_json=True (the model should produce a JSON string).
     """
-    if not OPENAI_API_KEY:
+    if not OPENAI_API_KEY or httpx is None:
         return None
 
     headers = {

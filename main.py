@@ -923,3 +923,122 @@ async def cma_summary(payload: SummaryRequest) -> Dict[str, str]:
     summary = await generate_cma_summary(payload.subject, payload.comps, payload.adjustments, payload.value)
     return {"summary": summary}
 
+@app.get("/pdfx", tags=["cma"])
+async def generate_pdf_with_summary(cma_run_id: str):
+    """
+    Generate a CMA PDF that includes an AI-written summary (or a safe fallback if AI is unavailable).
+    This route does not modify pdf_utils.py; it renders a clean PDF inline here using ReportLab.
+    """
+    from io import BytesIO
+    from typing import Any, Dict, List, Tuple
+    from fastapi import HTTPException
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib import colors
+
+    # Reuse your existing run storage
+    cma_run = _get_cma_run(cma_run_id)
+    if not cma_run:
+        raise HTTPException(status_code=404, detail="CMA run not found.")
+
+    subject = cma_run["subject"]                    # Property
+    comps_tuples: List[Tuple[Property, float]] = cma_run.get("comps", [])
+    estimate: float = cma_run.get("estimate", 0.0)
+    adjustments: Dict[str, Any] = cma_run.get("adjustments", {}) or {}
+
+    # Build dicts for AI summary request
+    subject_dict = {
+        "address": getattr(subject, "address", ""),
+        "lat": subject.lat,
+        "lng": subject.lng,
+        "beds": subject.beds,
+        "baths": subject.baths,
+        "living_sqft": subject.living_sqft,
+        "lot_sqft": subject.lot_sqft,
+        "year_built": subject.year_built,
+        "avm_value": estimate,
+    }
+    comp_dicts: List[Dict[str, Any]] = []
+    for comp, score in comps_tuples:
+        comp_dicts.append({
+            "id": getattr(comp, "id", ""),
+            "address": getattr(comp, "address", ""),
+            "lat": comp.lat,
+            "lng": comp.lng,
+            "property_type": comp.property_type,
+            "living_sqft": comp.living_sqft,
+            "lot_sqft": comp.lot_sqft,
+            "beds": comp.beds,
+            "baths": comp.baths,
+            "year_built": comp.year_built,
+            "raw_price": comp.raw_price,
+            "score": score,
+        })
+
+    # Ask AI for a short narrative (safe fallback inside helper)
+    try:
+        summary_text = await generate_cma_summary(subject_dict, comp_dicts, adjustments, estimate)
+    except Exception:
+        summary_text = "This CMA was generated automatically. Please review comps and adjustments."
+
+    # ---- Build a simple, professional PDF (independent of pdf_utils) ----
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=LETTER,
+        leftMargin=48, rightMargin=48, topMargin=54, bottomMargin=54
+    )
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="SmallGray", fontSize=9, textColor=colors.gray))
+    story: List[Any] = []
+
+    # Header
+    story.append(Paragraph("CMAi — Comparative Market Analysis", styles["Title"]))
+    addr = getattr(subject, "address", "") or "Subject Property"
+    story.append(Paragraph(addr, styles["Heading2"]))
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(f"Final Estimate: <b>${int(estimate):,}</b>", styles["Heading3"]))
+    story.append(Spacer(1, 12))
+
+    # Summary
+    story.append(Paragraph("Summary", styles["Heading2"]))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(summary_text, styles["BodyText"]))
+    story.append(Spacer(1, 14))
+
+    # Comps table (top 5)
+    rows = [["Address", "Beds", "Baths", "Sqft", "Year", "Price", "Score"]]
+    for comp, score in comps_tuples[:5]:
+        rows.append([
+            getattr(comp, "address", "") or "-",
+            comp.beds if getattr(comp, "beds", None) is not None else "-",
+            comp.baths if getattr(comp, "baths", None) is not None else "-",
+            int(comp.living_sqft) if getattr(comp, "living_sqft", None) else "-",
+            comp.year_built if getattr(comp, "year_built", None) else "-",
+            f"${int(comp.raw_price):,}" if getattr(comp, "raw_price", None) else "-",
+            f"{score:.2f}",
+        ])
+    tbl = Table(rows, hAlign="LEFT", colWidths=[170, 40, 40, 55, 45, 70, 45])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 10),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E5E7EB")),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("Generated by CMAi", styles["SmallGray"]))
+
+    doc.build(story)
+    pdf_bytes = buf.getvalue()
+
+    filename = f"cmai_{cma_run_id}.pdf"
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )

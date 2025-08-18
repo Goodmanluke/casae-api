@@ -22,7 +22,7 @@ except Exception:
     Client = None  # type: ignore
 
 # Import CMA schemas
-from cma_models import Subject, CMAInput, AdjustmentInput, Comp, CMAResponse
+from cma_models import Subject, CMAInput, AdjustmentInput, Comp, CMAResponse, SummaryRequest
 from fastapi.responses import StreamingResponse
 from io import BytesIO
 from pdf_utils import create_cma_pdf

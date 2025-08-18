@@ -26,6 +26,7 @@ from cma_models import Subject, CMAInput, AdjustmentInput, Comp, CMAResponse
 from fastapi.responses import StreamingResponse
 from io import BytesIO
 from pdf_utils import create_cma_pdf
+from services.ai import generate_cma_summary
 
 app = FastAPI(title="Casae API", version="0.2.0")
 
@@ -846,4 +847,19 @@ if rentcast_api_key:
         pass
 
         return response.json()
+
+
+class SummaryRequest(BaseModel):
+    """Request body for generating a CMA summary narrative."""
+    subject: Dict[str, Any]
+    comps: List[Dict[str, Any]]
+    adjustments: Dict[str, Any]
+    value: float
+
+
+@app.post("/cma/summary", tags=["cma"])
+async def cma_summary(payload: SummaryRequest) -> Dict[str, str]:
+    """Generate a CMA narrative summary using the AI."""
+    summary = await generate_cma_summary(payload.subject, payload.comps, payload.adjustments, payload.value)
+    return {"summary": summary}
 

@@ -1,6 +1,6 @@
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import 
+from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Tuple, Any
 import os
 import httpx

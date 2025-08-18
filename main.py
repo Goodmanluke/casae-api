@@ -734,119 +734,94 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
 @app.post("/cma/adjust", response_model=CMAResponse, tags=["cma"])
 async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
     """
-    Adjust a previous CMA run based on changes to the property.
-    Applies uplift factors and optionally reselects comps if the property class changes.
+    Recompute the CMA after user adjustments (condition, renos, sqft/beds/baths, etc.).
+    Uses AI to estimate the adjusted value and (optionally) suggest a refined comp list.
     """
-    baseline = _load_cma_run(payload.cma_run_id)
+    # Fetch the baseline run
+    baseline = _get_cma_run(payload.cma_run_id)
     if not baseline:
-        # Return a simple error response instead of raising, to keep API client-friendly
-        return CMAResponse(estimate=0.0, comps=[], explanation="Invalid cma_run_id", cma_run_id=payload.cma_run_id)
+        raise HTTPException(status_code=404, detail="Baseline CMA run not found.")
 
-    est = baseline["estimate"]
-    comps = baseline["comps"]
+    # Baseline pieces
+    subject_prop = baseline["subject"]            # Property model used in baseline
+    baseline_comps = baseline["comps"]           # List[Tuple[Property, float]] as (comp, score)
+    baseline_estimate = baseline.get("estimate") # float
 
-    # Calculate uplift
-    uplift = 0.0
-    uplift += _condition_uplift(payload.condition)
-    uplift += _renovations_uplift(payload.renovations or [])
-   uplift += _additions_uplift(
-    payload.add_beds, payload.add_baths, payload.add_sqft, comps, getattr(payload, "dock_length", 0) or 0
-)
+    # Prepare compact dicts for the AI
+    subject_dict: Dict[str, Any] = {
+        "address": getattr(subject_prop, "address", ""),
+        "lat": subject_prop.lat,
+        "lng": subject_prop.lng,
+        "beds": subject_prop.beds,
+        "baths": subject_prop.baths,
+        "living_sqft": subject_prop.living_sqft,
+        "lot_sqft": subject_prop.lot_sqft,
+        "year_built": subject_prop.year_built,
+        "avm_value": baseline_estimate,
+    }
 
+    comp_dicts: List[Dict[str, Any]] = []
+    for comp, score in baseline_comps:
+        comp_dicts.append({
+            "id": getattr(comp, "id", ""),
+            "address": getattr(comp, "address", ""),
+            "lat": comp.lat,
+            "lng": comp.lng,
+            "property_type": comp.property_type,
+            "living_sqft": comp.living_sqft,
+            "lot_sqft": comp.lot_sqft,
+            "beds": comp.beds,
+            "baths": comp.baths,
+            "year_built": comp.year_built,
+            "raw_price": comp.raw_price,
+        })
 
-    # Cap uplift at 35%
-    uplift = min(uplift, 0.35)
+    # Convert pydantic model -> dict (supports pydantic v2 .model_dump())
+    try:
+        adjustments_dict: Dict[str, Any] = payload.model_dump()  # type: ignore[attr-defined]
+    except Exception:
+        adjustments_dict = payload.dict()  # pydantic v1 fallback
 
-    new_estimate = round(est * (1.0 + uplift), 0)
-    new_comps = comps
+    # Ask AI for adjusted valuation (with optional new comp suggestions)
+    ai = await compute_adjusted_cma(subject_dict, comp_dicts, adjustments_dict)
+    new_estimate = round(ai.get("value", baseline_estimate) or baseline_estimate, 0)
+    explanation = ai.get("reasoning", "Adjusted estimate based on requested changes.")
 
-    # If adding bedrooms or significant sqft, reselect comps
-    if payload.add_beds > 0 or payload.add_sqft > 300:
-        # Update subject property
-        subject_prop: Property = baseline["subject"]
-        # Create new subject with updated features
-        updated_subject = Property(
-            id=subject_prop.id,
-            lat=subject_prop.lat,
-            lng=subject_prop.lng,
-            property_type=subject_prop.property_type,
-            living_sqft=subject_prop.living_sqft + payload.add_sqft,
-            lot_sqft=subject_prop.lot_sqft,
-            beds=subject_prop.beds + payload.add_beds,
-            baths=subject_prop.baths + int(payload.add_baths),
-            year_built=subject_prop.year_built,
-            condition_rating=subject_prop.condition_rating,
-            features=subject_prop.features,
-            sale_date=None,
-            raw_price=None,
-            market_index_geo=None,
-        )
+    # Optionally adopt AI-suggested comps by id, mapping back to (Property, score)
+    new_comps_tuples = baseline_comps
+    ai_comps = ai.get("comps")
+    if isinstance(ai_comps, list) and ai_comps:
+        id2orig: Dict[str, Tuple[Property, float]] = {
+            getattr(comp, "id", ""): (comp, score) for comp, score in baseline_comps
+        }
+        mapped: List[Tuple[Property, float]] = []
+        for c in ai_comps:
+            cid = (c or {}).get("id")
+            if cid and cid in id2orig:
+                mapped.append(id2orig[cid])
+        if mapped:
+            new_comps_tuples = mapped
 
-        # Prepare comps list as in baseline
-        comps_list: List[Property] = []
-        if supabase is not None:
-            try:
-                query = supabase.table("properties").select("*").eq("beds", updated_subject.beds)
-                response = query.execute()
-                data = None
-                if hasattr(response, "data"):
-                    data = response.data  # type: ignore[attr-defined]
-                elif isinstance(response, dict):
-                    data = response.get("data")
-                if data:
-                    for entry in data:
-                        comps_list.append(
-                            Property(
-                                id=str(entry.get("id")),
-                                lat=entry.get("lat", 0.0),
-                                lng=entry.get("lng", 0.0),
-                                property_type=entry.get("property_type", "SFR"),
-                                living_sqft=entry.get("living_sqft") or entry.get("sqft", 0.0) or 0.0,
-                                lot_sqft=entry.get("lot_size"),
-                                beds=entry.get("beds") or 0,
-                                baths=entry.get("baths") or 0,
-                                year_built=entry.get("year_built"),
-                                condition_rating=entry.get("condition_rating"),
-                                features=set(entry.get("features")) if entry.get("features") else set(),
-                                sale_date=None,
-                                raw_price=entry.get("raw_price") or entry.get("price"),
-                                market_index_geo=None,
-                            )
-                        )
-            except Exception:
-                comps_list = []
-        if not comps_list:
-            for entry in comps_data:
-                comps_list.append(
-                    Property(
-                        id=str(entry.get("id")),
-                        lat=entry.get("lat", 0.0),
-                        lng=entry.get("lng", 0.0),
-                        property_type="SFR",
-                        living_sqft=entry.get("sqft", 0.0),
-                        lot_sqft=entry.get("lot_size"),
-                        beds=entry.get("beds"),
-                        baths=entry.get("baths"),
-                        year_built=entry.get("year_built"),
-                        condition_rating=None,
-                        features=set(),
-                        sale_date=None,
-                        raw_price=entry.get("price"),
-                        market_index_geo=None,
-                    )
-                )
-
-        _, rescored = find_comps(updated_subject, comps_list, {}, default_weights, {}, len(comps))
-        new_comps = rescored
-
+    # Persist a new CMA run (child of baseline) and return
     new_run_id = str(uuid4())
-    _save_cma_run(new_run_id, baseline["subject"], new_comps, new_estimate, baseline=False, adjustments=payload.model_dump())
+    # Note: _save_cma_run is synchronous in the advanced baseline path; use the same style here.
+    # If your local signature differs, keep param order consistent with your implementation.
+    _save_cma_run(
+        new_run_id,
+        subject_prop,
+        new_comps_tuples,
+        new_estimate,
+        baseline=False,
+        adjustments=adjustments_dict,
+    )
+
     return CMAResponse(
         estimate=new_estimate,
-        comps=[_to_comp_model(comp, score) for comp, score in new_comps],
-        explanation="Adjusted estimate based on requested changes.",
+        comps=[_to_comp_model(comp, score) for comp, score in new_comps_tuples],
+        explanation=explanation,
         cma_run_id=new_run_id,
     )
+
 
 
 @app.post("/pdf", tags=["cma"])

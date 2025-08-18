@@ -26,7 +26,7 @@ from cma_models import Subject, CMAInput, AdjustmentInput, Comp, CMAResponse
 from fastapi.responses import StreamingResponse
 from io import BytesIO
 from pdf_utils import create_cma_pdf
-from services.ai import generate_cma_summary
+from services.ai import rank_comparables, compute_adjusted_cma, generate_cma_summary
 
 app = FastAPI(title="Casae API", version="0.2.0")
 

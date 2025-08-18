@@ -3,7 +3,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Tuple, Any
 import os
-import httpx
+try:
+    import httpx  # type: ignore
+except Exception:
+    # If httpx isn't installed, set to None so that AI helpers can gracefully
+    # fall back to heuristic logic without raising ImportError.
+    httpx = None  # type: ignore
 from pydantic import BaseModel
 from datetime import datetime
 from uuid import uuid4

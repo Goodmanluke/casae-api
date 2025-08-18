@@ -48,3 +48,10 @@ class CMAResponse(BaseModel):
     comps: List[Comp]
     explanation: str
     cma_run_id: str
+    
+class SummaryRequest(BaseModel):
+    """Request body for generating a CMA summary narrative."""
+    subject: Dict[str, Any]
+    comps: List[Dict[str, Any]]
+    adjustments: Dict[str, Any]
+    value: float

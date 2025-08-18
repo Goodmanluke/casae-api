@@ -76,8 +76,7 @@ comps_data = [
     },
     {
         "id": 3,
-        "address": "789
-        Pine Rd",
+    "address": "78 Pine Rd",
         "price": 280_000,
         "beds": 3,
         "baths": 2,

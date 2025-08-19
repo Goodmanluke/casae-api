@@ -1,7 +1,13 @@
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import 
-from typing import Optional, List, Dict, Tuple, Any
+from fastapi import FastAPI, Request, Query
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List as _ListType
+
+
+async def cma_baseline
+f/cma/baseline
+r/cma/adjust
+om typing import Optional, List, Dict, Tuple, Any
 import os
 import httpx
 from pydantic import BaseModel
@@ -646,6 +652,26 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     )
 
 
+
+@app.get("/cma/baseline", response_model=CMAResponse, tags=["cma"])
+async def cma_baseline_get(
+    address: str,
+    beds: int,
+    baths: float,
+    sqft: int,
+    lat: float = 0.0,
+    lng: float = 0.0,
+    year_built: Optional[int] = None,
+    lot_sqft: Optional[int] = None,
+) -> CMAResponse:
+    subject = Subject(
+        address=address, lat=lat, lng=lng, beds=beds, baths=baths, sqft=sqft,
+        year_built=year_built, lot_sqft=lot_sqft
+    )
+    payload = CMAInput(subject=subject, rules={})
+    return await cma_baseline(payload)
+
+
 @app.post("/cma/adjust", response_model=CMAResponse, tags=["cma"])
 async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
     """
@@ -762,6 +788,43 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
         explanation="Adjusted estimate based on requested changes.",
         cma_run_id=new_run_id,
     )
+
+@app.get("/cma/adjust", response_model=CMAResponse, tags=["cma"])
+async def cma_adjust_get(
+    cma_run_id: str,
+    condition: Optional[str] = None,
+    renovations: Optional[_ListType[str]] = Query(None, description="Repeat param, e.g. ?renovations=kitchen&renovations=bath OR pass comma-separated in 'renovations_csv'"),
+    renovations_csv: Optional[str] = None,
+    add_beds: int = 0,
+    add_baths: float = 0.0,
+    add_sqft: int = 0,
+    dock_length: int = 0,
+) -> CMAResponse:
+    """GET wrapper that builds AdjustmentInput and delegates to POST logic."""
+    renos: List[str] = renovations or []
+    if renovations_csv:
+        renos += [r.strip() for r in renovations_csv.split(",") if r.strip()]
+    payload = AdjustmentInput(
+        cma_run_id=cma_run_id,
+        condition=condition,
+        renovations=renos,
+        add_beds=add_beds,
+        add_baths=add_baths,
+        add_sqft=add_sqft,
+        dock_length=dock_length,
+    )
+    return await cma_adjust(payload)
+
+
+
+@app.get("/pdfx", tags=["cma"])
+async def pdfx(cma_run_id: str, request: Request) -> Dict[str, str]:
+    """
+    Returns a direct link the browser can fetch.
+    It points at the streaming /pdf endpoint with the run id as a query param.
+    """
+    return {"url": f"/pdf?cma_run_id={cma_run_id}"}
+
 
 
 @app.post("/pdf", tags=["cma"])

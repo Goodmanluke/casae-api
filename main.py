@@ -605,6 +605,45 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
                         explanation=explanation,
                         cma_run_id=cma_run_id,
                     )
+
+    # -------------------------------------------------------------------------
+    # GET version of the baseline endpoint
+    #
+    # Cloudflare or other infrastructure may restrict POST requests from the
+    # frontend. To allow browser clients to fetch a baseline CMA without
+    # encountering a 403 "Only GET requests are allowed" response, we expose
+    # a GET route that accepts query parameters.  This helper wraps the
+    # existing POST handler by constructing a CMAInput payload from the
+    # provided parameters and delegating to the cma_baseline function.
+    #
+    # Example: /cma/baseline?address=123%20Main%20St&lat=0&lng=0&beds=0&baths=0&sqft=0
+    @app.get("/cma/baseline", response_model=CMAResponse, tags=["cma"])
+    async def cma_baseline_get(
+        address: str,
+        lat: float = 0.0,
+        lng: float = 0.0,
+        beds: int = 0,
+        baths: int = 0,
+        sqft: int = 0,
+    ) -> CMAResponse:
+        """Create a baseline CMA via GET request.
+
+        Accepts query parameters and constructs the same payload used by the
+        POST version. This endpoint exists to accommodate environments where
+        only GET requests are permitted (e.g., Cloudflare rules).
+        """
+        payload = CMAInput(
+            subject=Subject(
+                address=address,
+                lat=lat,
+                lng=lng,
+                beds=beds,
+                baths=baths,
+                sqft=sqft,
+            ),
+            rules={},
+        )
+        return await cma_baseline(payload)
         except Exception:
             # In case of any error from RentCast, continue with internal comps logic
             pass
@@ -828,6 +867,43 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
         explanation=explanation,
         cma_run_id=new_run_id,
     )
+
+    # -------------------------------------------------------------------------
+    # GET version of the adjust endpoint
+    #
+    # Similar to the baseline GET endpoint, this route allows browsers or other
+    # clients constrained to GET requests to perform adjustments.  It accepts
+    # query parameters for each adjustment field and constructs an AdjustmentInput
+    # payload which is then passed to the existing cma_adjust POST handler.
+    #
+    # Example:
+    # /cma/adjust?cma_run_id=abc123&condition=good&renovations=kitchen&renovations=bath&add_beds=1&add_baths=0&add_sqft=200&dock_length=0
+    @app.get("/cma/adjust", response_model=CMAResponse, tags=["cma"])
+    async def cma_adjust_get(
+        cma_run_id: str,
+        condition: Optional[str] = None,
+        renovations: Optional[List[str]] = None,
+        add_beds: int = 0,
+        add_baths: int = 0,
+        add_sqft: int = 0,
+        dock_length: int = 0,
+    ) -> CMAResponse:
+        """Recompute the CMA via GET request using query parameters.
+
+        This endpoint constructs an AdjustmentInput from the provided query
+        parameters and delegates to the POST adjust handler.  It exists to
+        accommodate environments where POST requests are not allowed.
+        """
+        payload = AdjustmentInput(
+            cma_run_id=cma_run_id,
+            condition=condition,
+            renovations=renovations or [],
+            add_beds=add_beds,
+            add_baths=add_baths,
+            add_sqft=add_sqft,
+            dock_length=dock_length,
+        )
+        return await cma_adjust(payload)
 
 
 

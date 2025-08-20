@@ -645,6 +645,25 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     _save_cma_run(run_id, subject_prop, scored, estimate, baseline=True)
 
     return CMAResponse(
+
+@app.get("/cma/baseline", response_model=CMAResponse, tags=["cma"])
+async def cma_baseline_get(
+    address: str,
+    beds: int,
+    baths: float,
+    sqft: int,
+    lat: float = 0.0,
+    lng: float = 0.0,
+    year_built: Optional[int] = None,
+    lot_sqft: Optional[int] = None,
+) -> CMAResponse:
+    subject = Subject(
+        address=address, lat=lat, lng=lng, beds=beds, baths=baths, sqft=sqft,
+        year_built=year_built, lot_sqft=lot_sqft
+    )
+    payload = CMAInput(subject=subject, rules={})
+    return await cma_baseline(payload)
+
         estimate=estimate,
         comps=[_to_comp_model(comp, score) for comp, score in scored],
         explanation="Estimate based on similarity-weighted top comps.",
@@ -682,6 +701,32 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
     if not baseline:
         # Return a simple error response instead of raising, to keep API client-friendly
         return CMAResponse(estimate=0.0, comps=[], explanation="Invalid cma_run_id", cma_run_id=payload.cma_run_id)
+
+@app.get("/cma/adjust", response_model=CMAResponse, tags=["cma"])
+async def cma_adjust_get(
+    cma_run_id: str,
+    condition: Optional[str] = None,
+    renovations: Optional[_ListType[str]] = Query(None, description="Repeat param, e.g. ?renovations=kitchen&renovations=bath OR pass comma-separated in 'renovations_csv'"),
+    renovations_csv: Optional[str] = None,
+    add_beds: int = 0,
+    add_baths: float = 0.0,
+    add_sqft: int = 0,
+    dock_length: int = 0,
+) -> CMAResponse:
+    renos: List[str] = renovations or []
+    if renovations_csv:
+        renos += [r.strip() for r in renovations_csv.split(",") if r.strip()]
+    payload = AdjustmentInput(
+        cma_run_id=cma_run_id,
+        condition=condition,
+        renovations=renos,
+        add_beds=add_beds,
+        add_baths=add_baths,
+        add_sqft=add_sqft,
+        dock_length=dock_length,
+    )
+    return await cma_adjust(payload)
+
 
     est = baseline["estimate"]
     comps = baseline["comps"]
@@ -828,6 +873,14 @@ async def pdfx(cma_run_id: str, request: Request) -> Dict[str, str]:
 
 
 @app.post("/pdf", tags=["cma"])
+
+@app.get("/pdfx", tags=["cma"])
+async def pdfx(cma_run_id: str, request: Request) -> Dict[str, str]:
+    """
+    Returns a direct link to the streaming /pdf endpoint with the run id as a query param.
+    """
+    return {"url": f"/pdf?cma_run_id={cma_run_id}"}
+
 async def generate_pdf(cma_run_id: str) -> StreamingResponse:
     """
     Generate and return a PDF report for the given CMA run.
@@ -925,4 +978,3 @@ async def cma_summary(payload: SummaryRequest) -> Dict[str, str]:
     """Generate a CMA narrative summary using the AI."""
     summary = await generate_cma_summary(payload.subject, payload.comps, payload.adjustments, payload.value)
     return {"summary": summary}
-

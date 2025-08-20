@@ -27,7 +27,6 @@ class AdjustmentInput(BaseModel):
     add_beds: int = 0
     add_baths: float = 0.0
     add_sqft: int = 0
-    dock_length: int = 0
 
 class Comp(BaseModel):
     """Representation of a comparable property returned in a CMA response."""

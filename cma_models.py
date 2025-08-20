@@ -1,23 +1,22 @@
+from typing import Optional, List
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+
 
 class Subject(BaseModel):
-    """Pydantic model representing the subject property for CMA."""
     address: str
-    lat: float
-    lng: float
-    beds: int
-    baths: float
-    sqft: int
+    lat: float = 0.0
+    lng: float = 0.0
+    beds: Optional[int] = None
+    baths: Optional[float] = None
+    sqft: Optional[int] = None
     year_built: Optional[int] = None
     lot_sqft: Optional[int] = None
-    condition: Optional[str] = None
-    waterfront: Optional[bool] = False
+
 
 class CMAInput(BaseModel):
-    """Request body for creating a baseline CMA run."""
     subject: Subject
-    rules: Dict[str, Any] = {}
+    rules: dict = {}
+
 
 class AdjustmentInput(BaseModel):
     """Request body for adjusting a previous CMA run."""
@@ -27,22 +26,23 @@ class AdjustmentInput(BaseModel):
     add_beds: int = 0
     add_baths: float = 0.0
     add_sqft: int = 0
+    # ⬆️ dock_length removed
+
 
 class Comp(BaseModel):
-    """Representation of a comparable property returned in a CMA response."""
     id: str
     address: str
     raw_price: float
     living_sqft: int
     beds: int
     baths: float
-    year_built: Optional[int] = None
-    lot_sqft: Optional[int] = None
-    distance_mi: Optional[float] = None
+    year_built: Optional[int]
+    lot_sqft: Optional[int]
+    distance_mi: Optional[float]
     similarity: float
 
+
 class CMAResponse(BaseModel):
-    """Response schema for both baseline and adjusted CMA runs."""
     estimate: float
     comps: List[Comp]
     explanation: str

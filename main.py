@@ -1,7 +1,13 @@
+
 from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, List, Dict, Tuple, Any
 from typing import List as _ListType
+
+
+async def cma_baseline
+f/cma/baseline
+r/cma/adjust
+om typing import Optional, List, Dict, Tuple, Any
 import os
 import httpx
 from pydantic import BaseModel
@@ -11,33 +17,35 @@ from uuid import uuid4
 # Import advanced comps scoring classes and helpers
 from comps_scoring import Property, find_comps, default_weights
 
-# Attempt to import Supabase client; fall back gracefully if unavailable
 try:
+    # Import the Supabase client if available.  This package should be installed
+    # via requirements.txt as ``supabase-py``.  We wrap this in a try/except so
+    # that the API can still start even if the library is missing (for example
+    # during local development before dependencies are installed).
     from supabase import create_client, Client  # type: ignore
 except Exception:
     create_client = None  # type: ignore
     Client = None  # type: ignore
 
-# Import CMA schemas and utilities
+# Import CMA schemas
 from cma_models import Subject, CMAInput, AdjustmentInput, Comp, CMAResponse
 from fastapi.responses import StreamingResponse
 from io import BytesIO
 from pdf_utils import create_cma_pdf
 from services.ai import rank_comparables, compute_adjusted_cma, generate_cma_summary
 
-# Initialize FastAPI app
 app = FastAPI(title="Casae API", version="0.2.0")
 
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Supabase configuration
 #
-# We create a Supabase client using environment variables. If the required
+# We create a Supabase client using environment variables.  If the required
 # variables are not present or the client cannot be created, ``supabase`` will
 # remain ``None`` and the API will fall back to the built‑in sample comps
-# dataset. To query your real properties table, set ``SUPABASE_URL`` and
+# dataset.  To query your real properties table, set ``SUPABASE_URL`` and
 # ``SUPABASE_SERVICE_ROLE_KEY`` (or ``SUPABASE_KEY``) in your deployment
 # environment.
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
 supabase: Optional["Client"] = None
@@ -47,9 +55,9 @@ if create_client is not None and SUPABASE_URL and SUPABASE_KEY:
     except Exception:
         supabase = None
 
-# ----------------------------------------------------------------------------
-# Sample comps dataset used as a fallback when no database is configured
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Sample comps dataset
+# -----------------------------------------------------------------------------
 comps_data = [
     {
         "id": 1,
@@ -103,13 +111,13 @@ comps_data = [
     },
 ]
 
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # In-memory storage for CMA runs
 #
 # For demonstration purposes, we store CMA runs in a global dictionary keyed by
-# the run ID. In a production deployment this should be replaced with
+# the run ID.  In a production deployment this should be replaced with
 # persistent storage (e.g. Supabase or another database).
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 cma_runs_storage: Dict[str, Dict[str, Any]] = {}
 
 def _save_cma_run(run_id: str, subject: Property, comps: List[Tuple[Property, float]], estimate: float, baseline: bool = True, adjustments: Optional[Dict[str, Any]] = None) -> None:
@@ -127,7 +135,6 @@ def _load_cma_run(run_id: str) -> Optional[Dict[str, Any]]:
     return cma_runs_storage.get(run_id)
 
 # Adjustment helper functions
-
 def _condition_uplift(condition: Optional[str]) -> float:
     """Return the percentage uplift based on condition."""
     if not condition:
@@ -141,19 +148,23 @@ def _renovations_uplift(items: List[str]) -> float:
     return sum(weights.get(item.lower(), 0.0) for item in items)
 
 def _additions_uplift(add_beds: int, add_baths: int, add_sqft: int, comps: list, dock_length: int = 0) -> float:
-    """Return the percentage uplift based on additions (beds, baths, sqft, dock)."""
     uplift = 0.0
+
     # Bedrooms / baths
     uplift += 0.025 * max(0, int(add_beds or 0))
     uplift += 0.020 * max(0, int(add_baths or 0))
+
     # Sqft
     if add_sqft and add_sqft > 0:
         uplift += min(0.10, 0.00006 * add_sqft)
+
     # Dock length
     if dock_length and dock_length > 0:
         dock_uplift = 0.001 * dock_length   # 0.1% per foot
         uplift += min(dock_uplift, 0.03)    # cap 3%
+
     return uplift
+
 
 def _to_comp_model(comp: Property, similarity: float) -> Comp:
     """Convert internal Property to the API Comp model."""
@@ -170,13 +181,12 @@ def _to_comp_model(comp: Property, similarity: float) -> Comp:
         similarity=similarity,
     )
 
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # CORS configuration
-#
 # In production, the allowed origins will typically be configured via
-# environment variables or deployment settings. During development, we allow
+# environment variables or deployment settings.  During development, we allow
 # all origins so that local frontends can make requests to this API.
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -185,21 +195,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----------------------------------------------------------------------------
-# Basic endpoints: health and root
-# ----------------------------------------------------------------------------
+
 @app.get("/health", tags=["health"])
 async def health_check() -> Dict[str, str]:
     """Simple health check endpoint."""
     return {"status": "ok"}
 
+
 @app.get("/", tags=["root"])
 async def root() -> Dict[str, str]:
     return {"message": "Welcome to Casae API"}
 
-# ----------------------------------------------------------------------------
-# Comps suggestion and search endpoints
-# ----------------------------------------------------------------------------
+
 def compute_similarity(
     comp: dict,
     price: Optional[float],
@@ -210,7 +217,8 @@ def compute_similarity(
     lot_size: Optional[int],
 ) -> float:
     """
-    Compute a similarity score based on weighted differences. Scores are higher
+    Compute a similarity score based on weighted differences.  This helper
+    function is used by the `/comps/suggest` endpoint.  Scores are higher
     when the comp is closer to the subject parameters.
     """
     score = 0.0
@@ -235,6 +243,7 @@ def compute_similarity(
 
     return score / total_weight if total_weight > 0 else 0.0
 
+
 @app.get("/comps/suggest", tags=["comps"])
 async def comps_suggest(
     price: Optional[float] = None,
@@ -247,7 +256,7 @@ async def comps_suggest(
 ) -> List[dict]:
     """
     Suggest comparable properties sorted by similarity score using the in‑memory
-    sample data. The higher the score, the more similar the comp is to the
+    sample data.  The higher the score, the more similar the comp is to the
     subject parameters.
     """
     comps_with_scores = [
@@ -257,6 +266,7 @@ async def comps_suggest(
     sorted_comps = sorted(comps_with_scores, key=lambda x: x[1], reverse=True)
     top_comps = [comp for comp, _ in sorted_comps[:n]]
     return top_comps
+
 
 @app.api_route("/comps/search", methods=["GET", "POST"], tags=["comps"])
 async def comps_search(
@@ -272,12 +282,15 @@ async def comps_search(
 ) -> Dict[str, List[Dict]]:
     """
     Search for comparable properties using the advanced comps scoring algorithm.
-    Subject property details are provided via query parameters. If a Supabase
-    client is configured and available, this function will query the
-    ``properties`` table for candidate comps. Otherwise it will fall back to
-    the built‑in sample dataset.
+    Subject property details are provided via query parameters.  If a Supabase
+    client is configured and available, this function will query the ``properties``
+    table for candidate comps.  Otherwise it will fall back to the built‑in
+    sample dataset.
     """
-    # Construct the subject Property
+    # -------------------------------------------------------------------------
+    # Construct the subject ``Property``.  If fields are missing, default to
+    # zero or None as appropriate.
+    # -------------------------------------------------------------------------
     subject = Property(
         id="subject",
         lat=lat or 0.0,
@@ -297,19 +310,31 @@ async def comps_search(
 
     comps_list: List[Property] = []
 
-    # Attempt to fetch comps from Supabase
+    # -------------------------------------------------------------------------
+    # Attempt to fetch comps from Supabase.  We wrap this in a conditional so
+    # that if the client or environment variables are missing the code still
+    # executes and falls back gracefully to the local sample data.  We also
+    # surround the query with try/except to catch any runtime errors from the
+    # Supabase client.
+    # -------------------------------------------------------------------------
     if supabase is not None:
         try:
             query = supabase.table("properties").select("*")
-            # Apply filters
+            # Apply basic filters when provided.  Additional filtering logic
+            # (such as lat/lng radius or price windows) can be added later.
             if beds is not None:
                 query = query.eq("beds", beds)
             if baths is not None:
                 query = query.eq("baths", baths)
             if sqft is not None:
+                # The database may store living area under ``living_sqft`` or ``sqft``.
                 query = query.eq("living_sqft", sqft)
+            # Execute the query.  ``execute()`` returns an object whose
+            # ``data`` attribute contains the result list.
             response = query.execute()
             data = None
+            # ``supabase-py`` returns ``data`` either as an attribute or in the
+            # returned dictionary depending on the version.
             if hasattr(response, "data"):
                 data = response.data  # type: ignore[attr-defined]
             elif isinstance(response, dict):
@@ -322,22 +347,33 @@ async def comps_search(
                             lat=entry.get("lat", 0.0),
                             lng=entry.get("lng", 0.0),
                             property_type=entry.get("property_type", "SFR"),
-                            living_sqft=entry.get("living_sqft") or entry.get("sqft", 0.0) or 0.0,
+                            living_sqft=entry.get("living_sqft")
+                            or entry.get("sqft", 0.0)
+                            or 0.0,
                             lot_sqft=entry.get("lot_size"),
                             beds=entry.get("beds") or 0,
                             baths=entry.get("baths") or 0,
                             year_built=entry.get("year_built"),
                             condition_rating=entry.get("condition_rating"),
-                            features=set(entry.get("features")) if entry.get("features") else set(),
+                            features=set(entry.get("features"))
+                            if entry.get("features")
+                            else set(),
                             sale_date=None,
                             raw_price=entry.get("raw_price") or entry.get("price"),
                             market_index_geo=None,
                         )
                     )
         except Exception:
+            # If anything goes wrong (e.g. network error, invalid response),
+            # ignore Supabase results and fall back to the local sample data.
             comps_list = []
 
-    # If no comps from Supabase, use sample data
+    # -------------------------------------------------------------------------
+    # If Supabase returned no comps or the client was unavailable, use the
+    # built‑in sample data to ensure the endpoint still responds.  This helps
+    # development and acts as a last‑resort fallback in production if the
+    # database is unreachable.
+    # -------------------------------------------------------------------------
     if not comps_list:
         for entry in comps_data:
             comps_list.append(
@@ -359,7 +395,11 @@ async def comps_search(
                 )
             )
 
-    # Score comps using advanced scoring
+    # -------------------------------------------------------------------------
+    # Score the candidate comps using the advanced scoring algorithm.  We use an
+    # empty ``filters`` dictionary (no hard filters) and an empty market index.
+    # The ``return_limit`` parameter ensures we only take the top ``n`` comps.
+    # -------------------------------------------------------------------------
     filters: Dict[str, float] = {}
     market_index: Dict[Tuple[str, str], float] = {}
     _, scored = find_comps(subject, comps_list, filters, default_weights, market_index, n)
@@ -367,14 +407,23 @@ async def comps_search(
     results: List[Dict] = []
     for comp, score in scored:
         comp_dict = comp.__dict__.copy()
+        # Convert the features set back to a list for JSON serialization
         comp_dict["features"] = list(comp_dict.get("features", []))
         comp_dict["similarity"] = score
         results.append(comp_dict)
+
     return {"results": results}
 
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Saved searches endpoints
-# ----------------------------------------------------------------------------
+#
+# These endpoints allow the frontend to save and list users' saved search
+# criteria.  The ``/searches/save`` endpoint accepts a POST request with
+# ``user_id`` and ``params`` and stores the search in the ``saved_searches``
+# table.  The ``/searches/list`` endpoint accepts a GET request with a
+# ``user_id`` query parameter and returns all saved searches for that user.
+# -----------------------------------------------------------------------------
+
 class SaveSearchRequest(BaseModel):
     user_id: str
     params: Dict
@@ -382,7 +431,7 @@ class SaveSearchRequest(BaseModel):
 @app.post("/searches/save", tags=["searches"])
 async def save_search(request: SaveSearchRequest) -> Dict[str, str]:
     """
-    Save a search for the given user. Requires Supabase to be configured.
+    Save a search for the given user.  Requires Supabase to be configured.
 
     Parameters:
       user_id: identifier of the user saving the search
@@ -407,7 +456,7 @@ async def save_search(request: SaveSearchRequest) -> Dict[str, str]:
 @app.get("/searches/list", tags=["searches"])
 async def list_saved_searches(user_id: str) -> Dict[str, List[Dict]]:
     """
-    List all saved searches for a given user. If Supabase is not available
+    List all saved searches for a given user.  If Supabase is not available
     returns an empty list.
     """
     if supabase is None:
@@ -424,9 +473,15 @@ async def list_saved_searches(user_id: str) -> Dict[str, List[Dict]]:
     except Exception:
         return {"results": []}
 
-# ----------------------------------------------------------------------------
-# CMA endpoints: baseline and adjustments
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# CMA endpoints
+#
+# These endpoints implement the baseline and adjustment flows for AI-powered CMA.
+# They make use of the in-memory comps scoring engine and the adjustment helpers
+# defined above.  In a production environment these should save CMA runs and
+# associated comps to a persistent datastore (e.g. Supabase).
+# -----------------------------------------------------------------------------
+
 @app.post("/cma/baseline", response_model=CMAResponse, tags=["cma"])
 async def cma_baseline(payload: CMAInput) -> CMAResponse:
     """
@@ -496,13 +551,13 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
                     estimate = round(rc_price or 0)
                     cma_run_id = str(uuid4())
                     # Persist the CMA run and comps for audit
-                    _save_cma_run(
+                    await _save_cma_run(
+                        s,
                         cma_run_id,
-                        subject_prop,
-                        [(c, 1.0) for c in comps_list],  # treat each comp equally when using RentCast
+                        {"source": "rentcast"},
+                        comps_list,
                         estimate,
-                        baseline=True,
-                        adjustments=None,
+                        "Estimate from RentCast AVM.",
                     )
                     return CMAResponse(
                         estimate=estimate,
@@ -519,6 +574,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     if supabase is not None:
         try:
             query = supabase.table("properties").select("*")
+            # Example: filter by beds and baths similar to subject (±1)
             query = query.eq("beds", s.beds)
             response = query.execute()
             data = None
@@ -548,6 +604,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
                     )
         except Exception:
             comps_list = []
+
     if not comps_list:
         for entry in comps_data:
             comps_list.append(
@@ -572,14 +629,8 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     # Use advanced comps scoring engine
     filters: Dict[str, float] = {}
     market_index: Dict[Tuple[str, str], float] = {}
-    _, scored = find_comps(
-        subject_prop,
-        comps_list,
-        filters,
-        default_weights,
-        market_index,
-        payload.rules.get("n", 8) if isinstance(payload.rules.get("n", None), int) else 8,
-    )
+    _, scored = find_comps(subject_prop, comps_list, filters, default_weights, market_index, payload.rules.get("n", 8) if isinstance(payload.rules.get("n", None), int) else 8)
+
     # Compute estimate as similarity-weighted average of raw prices
     total_price = 0.0
     total_weight = 0.0
@@ -600,6 +651,8 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
         cma_run_id=run_id,
     )
 
+
+
 @app.get("/cma/baseline", response_model=CMAResponse, tags=["cma"])
 async def cma_baseline_get(
     address: str,
@@ -611,19 +664,13 @@ async def cma_baseline_get(
     year_built: Optional[int] = None,
     lot_sqft: Optional[int] = None,
 ) -> CMAResponse:
-    """GET wrapper for baseline CMA; constructs CMAInput and delegates to POST logic."""
     subject = Subject(
-        address=address,
-        lat=lat,
-        lng=lng,
-        beds=beds,
-        baths=baths,
-        sqft=sqft,
-        year_built=year_built,
-        lot_sqft=lot_sqft,
+        address=address, lat=lat, lng=lng, beds=beds, baths=baths, sqft=sqft,
+        year_built=year_built, lot_sqft=lot_sqft
     )
     payload = CMAInput(subject=subject, rules={})
     return await cma_baseline(payload)
+
 
 @app.post("/cma/adjust", response_model=CMAResponse, tags=["cma"])
 async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
@@ -633,31 +680,32 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
     """
     baseline = _load_cma_run(payload.cma_run_id)
     if not baseline:
-        return CMAResponse(
-            estimate=0.0,
-            comps=[],
-            explanation="Invalid cma_run_id",
-            cma_run_id=payload.cma_run_id,
-        )
+        # Return a simple error response instead of raising, to keep API client-friendly
+        return CMAResponse(estimate=0.0, comps=[], explanation="Invalid cma_run_id", cma_run_id=payload.cma_run_id)
+
     est = baseline["estimate"]
     comps = baseline["comps"]
+
     # Calculate uplift
     uplift = 0.0
     uplift += _condition_uplift(payload.condition)
     uplift += _renovations_uplift(payload.renovations or [])
-    uplift += _additions_uplift(
-        payload.add_beds,
-        payload.add_baths,
-        payload.add_sqft,
-        comps,
-        getattr(payload, "dock_length", 0) or 0,
-    )
-    uplift = min(uplift, 0.35)  # cap uplift at 35%
+   uplift += _additions_uplift(
+    payload.add_beds, payload.add_baths, payload.add_sqft, comps, getattr(payload, "dock_length", 0) or 0
+)
+
+
+    # Cap uplift at 35%
+    uplift = min(uplift, 0.35)
+
     new_estimate = round(est * (1.0 + uplift), 0)
     new_comps = comps
-    # Reselect comps if adding bedrooms or significant sqft
+
+    # If adding bedrooms or significant sqft, reselect comps
     if payload.add_beds > 0 or payload.add_sqft > 300:
+        # Update subject property
         subject_prop: Property = baseline["subject"]
+        # Create new subject with updated features
         updated_subject = Property(
             id=subject_prop.id,
             lat=subject_prop.lat,
@@ -674,6 +722,8 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
             raw_price=None,
             market_index_geo=None,
         )
+
+        # Prepare comps list as in baseline
         comps_list: List[Property] = []
         if supabase is not None:
             try:
@@ -726,17 +776,12 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
                         market_index_geo=None,
                     )
                 )
+
         _, rescored = find_comps(updated_subject, comps_list, {}, default_weights, {}, len(comps))
         new_comps = rescored
+
     new_run_id = str(uuid4())
-    _save_cma_run(
-        new_run_id,
-        baseline["subject"],
-        new_comps,
-        new_estimate,
-        baseline=False,
-        adjustments=payload.model_dump(),
-    )
+    _save_cma_run(new_run_id, baseline["subject"], new_comps, new_estimate, baseline=False, adjustments=payload.model_dump())
     return CMAResponse(
         estimate=new_estimate,
         comps=[_to_comp_model(comp, score) for comp, score in new_comps],
@@ -748,12 +793,7 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
 async def cma_adjust_get(
     cma_run_id: str,
     condition: Optional[str] = None,
-    renovations: Optional[_ListType[str]] = Query(
-        None,
-        description=(
-            "Repeat param, e.g. ?renovations=kitchen&renovations=bath OR pass comma-separated in 'renovations_csv'"
-        ),
-    ),
+    renovations: Optional[_ListType[str]] = Query(None, description="Repeat param, e.g. ?renovations=kitchen&renovations=bath OR pass comma-separated in 'renovations_csv'"),
     renovations_csv: Optional[str] = None,
     add_beds: int = 0,
     add_baths: float = 0.0,
@@ -775,9 +815,8 @@ async def cma_adjust_get(
     )
     return await cma_adjust(payload)
 
-# ----------------------------------------------------------------------------
-# PDF endpoints
-# ----------------------------------------------------------------------------
+
+
 @app.get("/pdfx", tags=["cma"])
 async def pdfx(cma_run_id: str, request: Request) -> Dict[str, str]:
     """
@@ -786,6 +825,8 @@ async def pdfx(cma_run_id: str, request: Request) -> Dict[str, str]:
     """
     return {"url": f"/pdf?cma_run_id={cma_run_id}"}
 
+
+
 @app.post("/pdf", tags=["cma"])
 async def generate_pdf(cma_run_id: str) -> StreamingResponse:
     """
@@ -793,38 +834,34 @@ async def generate_pdf(cma_run_id: str) -> StreamingResponse:
 
     This endpoint looks up the CMA run stored in memory and generates a
     simple PDF that includes the subject's estimated value and the list
-    of comparable properties. The PDF is returned directly in the
-    response as a streaming download. If the requested run ID does
+    of comparable properties.  The PDF is returned directly in the
+    response as a streaming download.  If the requested run ID does
     not exist, a 404 PDF is returned.
     """
     cma_run = _load_cma_run(cma_run_id)
     if not cma_run:
+        # If the run is missing, return a tiny PDF with a "not found" message
         empty_pdf = create_cma_pdf(cma_run_id, {"subject": None, "estimate": 0.0, "comps": []})
         return StreamingResponse(BytesIO(empty_pdf), media_type="application/pdf", status_code=404)
+    # Build the PDF bytes using our utility
     pdf_bytes = create_cma_pdf(cma_run_id, cma_run)
     filename = f"cma_{cma_run_id}.pdf"
-    return StreamingResponse(
-        BytesIO(pdf_bytes),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-
-# ----------------------------------------------------------------------------
-# RentCast vendor endpoint
-# ----------------------------------------------------------------------------
+    return StreamingResponse(BytesIO(pdf_bytes), media_type="application/pdf", headers={
+        "Content-Disposition": f"attachment; filename={filename}"
+    })
+    
 @app.get("/vendor/rentcast/value", tags=["vendor", "rentcast"])
 async def rentcast_value(address: str, beds: Optional[int] = None, baths: Optional[float] = None, sqft: Optional[int] = None):
     """
     Call RentCast AVM to retrieve property value estimate and comparables.
     """
     rentcast_api_key = os.getenv("RENTCAST_API_KEY")
-    if not rentcast_api_key:
-        return {"error": "RentCast API key not configured"}
+if rentcast_api_key:
     params = {
-        "address": address,
-        "beds": beds or "",
-        "baths": baths or "",
-        "squareFootage": sqft or "",
+        "address": s.address,
+        "beds": s.beds or "",
+        "baths": s.baths or "",
+        "squareFootage": s.sqft or "",
     }
     try:
         async with httpx.AsyncClient() as client:
@@ -838,42 +875,43 @@ async def rentcast_value(address: str, beds: Optional[int] = None, baths: Option
             rc_price = data.get("price")
             rc_comps = data.get("comparables", [])
             if rc_price and rc_comps:
+                # map comparables into your Property model
                 comps_list: List[Property] = []
                 for comp in rc_comps:
                     comps_list.append(
                         Property(
-                            id=str(comp.get("id", "rentcast")),
-                            address=comp.get("formattedAddress") or "",
+                            address=comp.get("formattedAddress"),
                             lat=comp.get("latitude"),
                             lng=comp.get("longitude"),
-                            property_type="SFR",
-                            living_sqft=comp.get("squareFootage") or 0.0,
-                            lot_sqft=comp.get("lotSize"),
                             beds=comp.get("bedrooms"),
                             baths=comp.get("bathrooms"),
-                            year_built=comp.get("yearBuilt"),
-                            condition_rating=None,
-                            features=set(),
-                            sale_date=None,
+                            sqft=comp.get("squareFootage"),
                             raw_price=comp.get("price"),
-                            market_index_geo=None,
+                            # add other fields as needed
                         )
                     )
                 estimate = round(rc_price or 0)
                 cma_run_id = str(uuid4())
+                await _save_cma_run(
+                    s,
+                    cma_run_id,
+                    {"source": "rentcast"},
+                    comps_list,
+                    estimate,
+                    "Estimate from RentCast AVM",
+                )
                 return CMAResponse(
                     estimate=estimate,
                     comps=comps_list,
                     explanation="Estimate from RentCast AVM.",
                     cma_run_id=cma_run_id,
                 )
-        return {"error": "Unable to fetch RentCast data"}
     except Exception:
-        return {"error": "Error calling RentCast"}
+        pass
 
-# ----------------------------------------------------------------------------
-# CMA narrative summary endpoint
-# ----------------------------------------------------------------------------
+        return response.json()
+
+
 class SummaryRequest(BaseModel):
     """Request body for generating a CMA summary narrative."""
     subject: Dict[str, Any]
@@ -881,13 +919,10 @@ class SummaryRequest(BaseModel):
     adjustments: Dict[str, Any]
     value: float
 
+
 @app.post("/cma/summary", tags=["cma"])
 async def cma_summary(payload: SummaryRequest) -> Dict[str, str]:
     """Generate a CMA narrative summary using the AI."""
-    summary = await generate_cma_summary(
-        payload.subject,
-        payload.comps,
-        payload.adjustments,
-        payload.value,
-    )
+    summary = await generate_cma_summary(payload.subject, payload.comps, payload.adjustments, payload.value)
     return {"summary": summary}
+

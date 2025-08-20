@@ -434,6 +434,41 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     Returns the estimated value and the list of top comps.
     """
     s = payload.subject
+        # Auto-fill missing property details using Supabase if available
+    if supabase is not None and (
+        (s.beds is None or s.beds == 0) or
+        (s.baths is None or s.baths == 0) or
+        (s.sqft is None or s.sqft == 0)
+    ):
+        try:
+            query = supabase.table("properties").select("beds,baths,living_sqft")
+            # Filter by lat and lng to identify the subject property
+            if s.lat is not None and s.lat != 0:
+                query = query.eq("lat", s.lat)
+            if s.lng is not None and s.lng != 0:
+                query = query.eq("lng", s.lng)
+            # Optionally also filter by address if provided
+            if hasattr(s, "address") and s.address:
+                query = query.eq("address", s.address)
+            response = query.limit(1).execute()
+            data = None
+            if hasattr(response, "data"):
+                data = response.data  # type: ignore[attr-defined]
+            elif isinstance(response, dict):
+                data = response.get("data")
+            if data:
+                entry = data[0]
+                # Update missing or zero values with fetched values
+                if (s.beds is None or s.beds == 0) and entry.get("beds") is not None:
+                    s.beds = entry.get("beds")
+                if (s.baths is None or s.baths == 0) and entry.get("baths") is not None:
+                    s.baths = entry.get("baths")
+                if (s.sqft is None or s.sqft == 0) and entry.get("living_sqft") is not None:
+                    s.sqft = entry.get("living_sqft")
+        except Exception:
+            # Ignore errors when attempting to fetch details
+            pass
+
     # Construct the internal Property for the subject
     subject_prop = Property(
         id="subject",

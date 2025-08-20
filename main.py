@@ -7,7 +7,10 @@ import httpx
 from pydantic import BaseModel
 from datetime import datetime
 from uuid import uuid4
+from fastapi.responses import StreamingResponse  # <-- add this
 from io import BytesIO
+
+
 
 # Advanced comps scoring helpers (unchanged)
 from comps_scoring import Property, find_comps, default_weights

@@ -4,7 +4,6 @@ SQLAlchemy==2.0.29
 asyncpg==0.29.0
 
 python-dotenv==1.0.1
-ppydantic>=2.11.7,<3.0
-
+pydantic>=2,<3
 supabase==2.18.1
 httpx==0.27

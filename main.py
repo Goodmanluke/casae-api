@@ -575,6 +575,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
 # ---------------------------------------------------------------------------
 # CMA: Baseline GET wrapper (unchanged)
 # ---------------------------------------------------------------------------
+# CMA: Baseline GET wrapper
 @app.get("/cma/baseline", response_model=CMAResponse)
 async def cma_baseline_get(
     address: str,
@@ -596,8 +597,9 @@ async def cma_baseline_get(
         year_built=year_built,
         lot_sqft=lot_sqft,
     )
-    payload = CMAInput(subject=subject, rules={})
+    payload = CMAInput(subject=subject)
     return await cma_baseline(payload)
+
 
 # ---------------------------------------------------------------------------
 # CMA: Adjust (POST) and GET wrapper (dock removed)

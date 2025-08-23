@@ -415,22 +415,22 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
             pass
 
     # Build subject property for comps selection
-    subject_prop = Property(
-        id="subject",
-        lat=s.lat,
-        lng=s.lng,
-        property_type="SFR",
-        living_sqft=s.sqft,
-        lot_sqft=s.lot_sqft,
-        beds=s.beds,
-        baths=int(s.baths),
-        year_built=s.year_built,
-        condition_rating=None,
-        features=set(),
-        sale_date=None,
-        raw_price=None,
-        market_index_geo=None,
-    )
+   subject_prop = Property(
+    id="subject",
+    lat=float(getattr(s, "lat", 0.0) or 0.0),
+    lng=float(getattr(s, "lng", 0.0) or 0.0),
+    property_type="SFR",
+    living_sqft=float(s.sqft or 0),    # default to 0 if None
+    lot_sqft=float(s.lot_sqft) if s.lot_sqft is not None else None,
+    beds=int(s.beds or 0),            # default to 0 if None
+    baths=int(s.baths or 0),          # default to 0 if None
+    year_built=int(s.year_built) if s.year_built is not None else None,
+    condition_rating=None,
+    features=set(),
+    sale_date=None,
+    raw_price=None,
+    market_index_geo=None,
+)
 
     # Try RentCast AVM (if key configured)
     rentcast_api_key = os.getenv("RENTCAST_API_KEY")

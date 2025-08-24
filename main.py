@@ -253,6 +253,8 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
 
     return CMAResponse(
         estimate=estimate,
+                subject=s,
+
         comps=[Comp(id=str(c.id), address=c.address, raw_price=c.raw_price, living_sqft=c.living_sqft,
                     beds=c.beds, baths=c.baths, year_built=c.year_built, lot_sqft=c.lot_sqft,
                     distance_mi=None, similarity=sc) for c, sc in scored],

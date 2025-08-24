@@ -246,7 +246,7 @@ async def comps_search(
                             lat=entry.get("lat", 0.0),
                             lng=entry.get("lng", 0.0),
                             property_type=entry.get("property_type", "SFR"),
-                            living_sqft=entry.get("living_sqft") or entry.get("sqft", 0.0) or 0.0),
+                            living_sqft=entry.get("living_sqft") or entry.get("sqft", 0.0) or 0.0,
                             lot_sqft=entry.get("lot_size"),
                             beds=entry.get("beds") or 0,
                             baths=entry.get("baths") or 0,

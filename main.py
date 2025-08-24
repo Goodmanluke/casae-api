@@ -1,8 +1,11 @@
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Tuple, Any
 from typing import List as _ListType
 import os
+import json
+import time
+import logging
 import httpx
 from pydantic import BaseModel
 from datetime import datetime
@@ -10,7 +13,7 @@ from uuid import uuid4
 from fastapi.responses import StreamingResponse  # if PDF endpoints are used
 from io import BytesIO
 
-# Advanced comps scoring helpers (unchanged)
+# Advanced comps scoring helpers (existing in your repo)
 from comps_scoring import Property, find_comps, default_weights
 
 # Attempt to import Supabase client; fall back gracefully if unavailable
@@ -20,15 +23,16 @@ except Exception:
     create_client = None  # type: ignore
     Client = None  # type: ignore
 
-# API schemas
+# API schemas (existing in your repo)
 from cma_models import Subject, CMAInput, AdjustmentInput, Comp, CMAResponse
 
-# PDF and AI services
+# PDF and AI services (existing in your repo)
 from pdf_utils import create_cma_pdf
 from services.ai import rank_comparables, compute_adjusted_cma, generate_cma_summary
 
-app = FastAPI(title="Casae API", version="0.2.1")
+app = FastAPI(title="Casae API", version="0.2.2")
 
+# ------------------------------- CORS ---------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,9 +41,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Supabase configuration
-# ---------------------------------------------------------------------------
+# ----------------------------- Logging --------------------------------
+logger = logging.getLogger("uvicorn.error")
+
+# -------------------------- Supabase config ---------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
 
@@ -50,9 +55,7 @@ if create_client is not None and SUPABASE_URL and SUPABASE_KEY:
     except Exception:
         supabase = None
 
-# ---------------------------------------------------------------------------
-# Sample comps dataset (fallback if DB not configured)
-# ---------------------------------------------------------------------------
+# -------------------------- Sample dataset ----------------------------
 comps_data = [
     {"id": 1, "address": "123 Main St", "price": 300_000, "beds": 3, "baths": 2, "sqft": 1_500, "year_built": 1995, "lot_size": 6_000},
     {"id": 2, "address": "456 Oak Ave", "price": 320_000, "beds": 4, "baths": 3, "sqft": 1_800, "year_built": 2000, "lot_size": 6_500},
@@ -61,9 +64,7 @@ comps_data = [
     {"id": 5, "address": "202 Maple St", "price": 295_000, "beds": 3, "baths": 2, "sqft": 1_200, "year_built": 1985, "lot_size": 5_000},
 ]
 
-# ---------------------------------------------------------------------------
-# In-memory storage for CMA runs
-# ---------------------------------------------------------------------------
+# ------------------------ In-memory CMA storage -----------------------
 cma_runs_storage: Dict[str, Dict[str, Any]] = {}
 
 
@@ -87,105 +88,122 @@ def _save_cma_run(
 def _load_cma_run(run_id: str) -> Optional[Dict[str, Any]]:
     return cma_runs_storage.get(run_id)
 
+# ------------------------- RentCast helper ----------------------------
+RENTCAST_TTL_SECONDS = 15 * 60  # cache same address for 15 minutes
+_rentcast_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}  # addr -> (ts, details)
 
-# ---------------------------------------------------------------------------
-# RentCast property lookup helper
-# ---------------------------------------------------------------------------
+
+def _from_cache(address: str) -> Optional[Dict[str, Any]]:
+    v = _rentcast_cache.get(address.lower().strip())
+    if not v:
+        return None
+    ts, payload = v
+    if (time.time() - ts) < RENTCAST_TTL_SECONDS:
+        return payload
+    _rentcast_cache.pop(address.lower().strip(), None)
+    return None
+
+
+def _to_cache(address: str, payload: Dict[str, Any]) -> None:
+    _rentcast_cache[address.lower().strip()] = (time.time(), payload)
+
+
 async def fetch_property_details(address: str) -> Optional[Dict[str, Any]]:
     """
-    Call RentCast Property Records API to fetch details like beds, baths,
-    living area, year built, and lot size for a given address.
-    Returns None if no key or no results.
+    Fetch beds, baths, sqft, year_built, lot_sqft for address from RentCast.
+    Handles multiple response shapes and logs issues for debugging.
+    Caches results for a short TTL to avoid redundant calls.
     """
+    cached = _from_cache(address)
+    if cached is not None:
+        return cached
+
     api_key = os.getenv("RENTCAST_API_KEY")
     if not api_key:
+        logger.warning("RENTCAST_API_KEY not set – skipping RentCast lookup")
         return None
 
     params = {"address": address}
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
                 "https://api.rentcast.io/v1/properties",
                 params=params,
                 headers={"X-Api-Key": api_key},
             )
         if resp.status_code != 200:
+            logger.warning("RentCast non‑200 %s: %s", resp.status_code, resp.text[:300])
             return None
+
         data = resp.json()
-        props = data.get("properties") or data.get("data") or data.get("results")
-        if not props or not isinstance(props, list):
+        candidates = None
+        # rentcast wraps response different ways
+        if isinstance(data, dict):
+            if isinstance(data.get("properties"), list):
+                candidates = data["properties"]
+            elif isinstance(data.get("results"), list):
+                candidates = data["results"]
+            elif isinstance(data.get("data"), list):
+                candidates = data["data"]
+            elif any(k in data for k in ("beds", "bedrooms", "sqft", "livingArea")):
+                candidates = [data]
+
+        if not candidates:
+            logger.warning(
+                "RentCast unexpected JSON shape: %s",
+                list(data.keys()) if isinstance(data, dict) else type(data),
+            )
             return None
-        prop = props[0]
-        return {
-            "beds": prop.get("beds") or prop.get("bedrooms"),
-            "baths": prop.get("baths") or prop.get("bathrooms"),
-            "sqft": prop.get("livingArea") or prop.get("sqft") or prop.get("squareFootage"),
-            "year_built": prop.get("yearBuilt"),
-            "lot_sqft": prop.get("lotSize"),
-        }
-    except Exception:
+
+        prop = candidates[0] or {}
+
+        def _i(*keys):
+            for k in keys:
+                v = prop.get(k)
+                if v is not None:
+                    try:
+                        return int(v)
+                    except Exception:
+                        try:
+                            return int(float(v))
+                        except Exception:
+                            continue
+            return None
+
+        beds = _i("beds", "bedrooms")
+        baths = _i("baths", "bathrooms")
+        sqft = _i("livingArea", "sqft", "squareFootage")
+        year_built = _i("yearBuilt", "year_built")
+        lot_sqft = _i("lotSize", "lot_sqft", "lotSizeSqft")
+
+        if any(v is not None for v in (beds, baths, sqft, year_built, lot_sqft)):
+            payload = {
+                "beds": beds,
+                "baths": baths,
+                "sqft": sqft,
+                "year_built": year_built,
+                "lot_sqft": lot_sqft,
+            }
+            _to_cache(address, payload)
+            return payload
+        else:
+            logger.warning("RentCast returned no usable fields for %s: %s", address, json.dumps(prop)[:300])
+            return None
+
+    except Exception as e:
+        logger.exception("RentCast exception for %s: %s", address, e)
         return None
 
 
-# ---------------------------------------------------------------------------
-# Uplift helpers (dock removed)
-# ---------------------------------------------------------------------------
-def _condition_uplift(condition: Optional[str]) -> float:
-    if not condition:
-        return 0.0
-    mapping = {
-        "poor": -0.08,
-        "fair": -0.03,
-        "good": 0.0,
-        "very_good": 0.03,
-        "excellent": 0.06,
-    }
-    return mapping.get(condition.lower(), 0.0)
-
-
-def _renovations_uplift(items: List[str]) -> float:
-    # Removed dock
-    weights = {"kitchen": 0.06, "bath": 0.05, "flooring": 0.02, "roof": 0.01, "hvac": 0.01}
-    return sum(weights.get(item.lower(), 0.0) for item in items)
-
-
-def _additions_uplift(add_beds: int, add_baths: int, add_sqft: int, comps: list) -> float:
-    uplift = 0.0
-    uplift += 0.025 * max(0, int(add_beds or 0))
-    uplift += 0.020 * max(0, int(add_baths or 0))
-    if add_sqft and add_sqft > 0:
-        uplift += min(0.10, 0.00006 * add_sqft)
-    return uplift
-
-
-def _to_comp_model(comp: Property, similarity: float) -> Comp:
-    return Comp(
-        id=str(comp.id),
-        address=getattr(comp, "address", ""),
-        raw_price=comp.raw_price or 0.0,
-        living_sqft=int(comp.living_sqft or 0),
-        lot_sqft=int(getattr(comp, "lot_sqft", 0) or 0),
-        beds=int(comp.beds or 0),
-        baths=int(comp.baths or 0),
-        year_built=int(getattr(comp, "year_built", 0) or 0),
-        condition_rating=float(getattr(comp, "condition_rating", 0.0) or 0.0),
-        features=list(getattr(comp, "features", set()) or []),
-        sale_date=None,
-        market_index_geo=None,
-    )
-
-
-# ---------------------------------------------------------------------------
-# /comps/search (GET/POST) - quick comps suggestion and listing
-# ---------------------------------------------------------------------------
+# --------------------------- /comps/search ----------------------------
 @app.api_route("/comps/search", methods=["GET", "POST"])
 async def comps_search(
     lat: Optional[float] = None,
     lng: Optional[float] = None,
     price: Optional[float] = None,
     beds: Optional[int] = None,
-    baths: Optional[int] = None,
-    sqft: Optional[float] = None,
+    baths: Optional[float] = None,
+    sqft: Optional[int] = None,
     year_built: Optional[int] = None,
     lot_size: Optional[int] = None,
     n: int = 5,
@@ -198,7 +216,7 @@ async def comps_search(
         living_sqft=sqft or 0.0,
         lot_sqft=lot_size,
         beds=beds or 0,
-        baths=baths or 0,
+        baths=baths or 0.0,
         year_built=year_built,
         condition_rating=None,
         features=set(),
@@ -209,7 +227,6 @@ async def comps_search(
 
     comps_list: List[Property] = []
 
-    # Supabase comps search (partial match)
     if supabase is not None:
         try:
             query = supabase.table("properties").select("*")
@@ -229,7 +246,7 @@ async def comps_search(
                             lat=entry.get("lat", 0.0),
                             lng=entry.get("lng", 0.0),
                             property_type=entry.get("property_type", "SFR"),
-                            living_sqft=entry.get("living_sqft") or entry.get("sqft", 0.0) or 0.0,
+                            living_sqft=entry.get("living_sqft") or entry.get("sqft", 0.0) or 0.0),
                             lot_sqft=entry.get("lot_size"),
                             beds=entry.get("beds") or 0,
                             baths=entry.get("baths") or 0,
@@ -279,9 +296,7 @@ async def comps_search(
     return {"results": results}
 
 
-# ---------------------------------------------------------------------------
-# Saved searches (Supabase)
-# ---------------------------------------------------------------------------
+# --------------------------- Saved Searches ---------------------------
 class SaveSearchRequest(BaseModel):
     user_id: str
     params: Dict
@@ -316,14 +331,12 @@ async def list_saved_searches(user_id: str) -> Dict[str, List[Dict]]:
         return {"results": []}
 
 
-# ---------------------------------------------------------------------------
-# CMA: Baseline (POST) with auto-pop via RentCast and optional AVM
-# ---------------------------------------------------------------------------
+# --------------------------- CMA Baseline -----------------------------
 @app.post("/cma/baseline", response_model=CMAResponse)
 async def cma_baseline(payload: CMAInput) -> CMAResponse:
     s = payload.subject
 
-    # Step 1: auto-fill missing beds/baths/sqft using RentCast property records
+    # Step 1: RentCast autofill when any of the key fields are missing
     try:
         if (not s.beds or s.beds == 0) or (not s.baths or s.baths == 0) or (not s.sqft or s.sqft == 0):
             details = await fetch_property_details(s.address)
@@ -341,7 +354,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     except Exception:
         pass
 
-    # Step 2: auto-fill missing beds/baths/sqft via Supabase (if configured)
+    # Step 2: Supabase fallback
     if supabase is not None and ((not s.beds) or (not s.baths) or (not s.sqft)):
         try:
             query = supabase.table("properties").select("beds,baths,living_sqft,year_built,lot_size")
@@ -370,7 +383,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
 
     # Build subject property for comps selection (safe defaults)
     _beds = int(s.beds or 0)
-    _baths = int(s.baths or 0)
+    _baths = float(s.baths or 0.0)
     _sqft = float(s.sqft or 0)
 
     subject_prop = Property(
@@ -390,66 +403,33 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
         market_index_geo=None,
     )
 
-    # Try RentCast AVM (if key configured)
-    rentcast_api_key = os.getenv("RENTCAST_API_KEY")
-    if rentcast_api_key:
-        params = {
-            "address": s.address,
-            "beds": s.beds or "",
-            "baths": s.baths or "",
-            "squareFootage": s.sqft or "",
-        }
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    "https://api.rentcast.io/v1/avm/value",
-                    params=params,
-                    headers={"X-Api-Key": rentcast_api_key},
-                )
-            if resp.status_code == 200:
-                data = resp.json()
-                rc_price = data.get("price")
-                rc_comps = data.get("comparables", []) or []
-                if rc_price and rc_comps:
-                    comps_list: List[Property] = []
-                    for comp in rc_comps:
-                        comps_list.append(
-                            Property(
-                                id=str(comp.get("id", "rentcast")),
-                                address=comp.get("formattedAddress") or "",
-                                lat=comp.get("latitude"),
-                                lng=comp.get("longitude"),
-                                property_type="SFR",
-                                living_sqft=comp.get("squareFootage") or 0.0,
-                                lot_sqft=comp.get("lotSize"),
-                                beds=comp.get("bedrooms"),
-                                baths=comp.get("bathrooms"),
-                                year_built=comp.get("yearBuilt"),
-                                condition_rating=None,
-                                features=set(),
-                                sale_date=None,
-                                raw_price=comp.get("price"),
-                                market_index_geo=None,
-                            )
-                        )
-                    estimate = round(rc_price or 0)
-                    cma_run_id = str(uuid4())
-                    _save_cma_run(
-                        cma_run_id,
-                        subject_prop,
-                        [(c, 1.0) for c in comps_list],
-                        estimate,
-                        baseline=True,
-                        adjustments=None,
+    # Optional: AVM value lookup (set RENTCAST_USE_AVM=1 or payload.rules["use_avm"] to enable)
+    use_avm = os.getenv("RENTCAST_USE_AVM") == "1" or bool(getattr(payload, "rules", {}).get("use_avm", False))
+    if use_avm:
+        api_key = os.getenv("RENTCAST_API_KEY")
+        if api_key:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(
+                        "https://api.rentcast.io/v1/avm/value",
+                        params={
+                            "address": s.address,
+                            "beds": s.beds or "",
+                            "baths": s.baths or "",
+                            "squareFootage": s.sqft or "",
+                        },
+                        headers={"X-Api-Key": api_key},
                     )
-                    return CMAResponse(
-                        estimate=estimate,
-                        comps=comps_list,
-                        explanation="Estimate from RentCast AVM.",
-                        cma_run_id=cma_run_id,
-                    )
-        except Exception:
-            pass
+                if resp.status_code == 200:
+                    data = resp.json()
+                    rc_price = data.get("price")
+                    if isinstance(rc_price, (int, float)) and rc_price > 0:
+                        # Optionally, use rc_price as an external check / narrative add-on.
+                        pass
+                else:
+                    logger.warning("AVM non-200 %s: %s", resp.status_code, resp.text[:200])
+            except Exception:
+                logger.exception("AVM request failed for address=%s", s.address)
 
     # Otherwise compute internal comps & estimate
     comps_list: List[Property] = []
@@ -501,7 +481,6 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
                 )
             )
 
-    # Compute estimate from scored comps
     filters: Dict[str, float] = {}
     market_index: Dict[Tuple[str, str], float] = {}
     _, scored = find_comps(
@@ -512,6 +491,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
         market_index,
         payload.rules.get("n", 8) if isinstance(payload.rules.get("n", None), int) else 8,
     )
+
     total_price = 0.0
     total_weight = 0.0
     for comp, score in scored:
@@ -533,9 +513,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     )
 
 
-# ---------------------------------------------------------------------------
-# CMA: Baseline GET wrapper (optional) – tolerate missing params by defaulting
-# ---------------------------------------------------------------------------
+# ----------------------------- GET wrapper ----------------------------
 @app.get("/cma/baseline", response_model=CMAResponse)
 async def cma_baseline_get(
     address: str,
@@ -561,9 +539,7 @@ async def cma_baseline_get(
     return await cma_baseline(payload)
 
 
-# ---------------------------------------------------------------------------
-# CMA: Adjust (POST) - minimal demo (optional)
-# ---------------------------------------------------------------------------
+# ------------------------------ /cma/adjust ---------------------------
 @app.post("/cma/adjust", response_model=CMAResponse)
 async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
     baseline = _load_cma_run(payload.cma_run_id)
@@ -574,12 +550,10 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
     comps = baseline["comps"]
     est = baseline["estimate"]
 
-    # very simple demo uplift (reuse helpers)
     uplift = 0.0
-    uplift += _condition_uplift(payload.condition)
+    uplift += 0.0 if not payload.condition else _condition_uplift(payload.condition)
     uplift += _renovations_uplift(payload.renovations or [])
     if payload.add_beds > 0 or payload.add_sqft > 300:
-        # reselect comps using updated subject
         updated_subject = Property(
             id=subject_prop.id,
             lat=subject_prop.lat,
@@ -659,3 +633,10 @@ async def cma_adjust(payload: AdjustmentInput) -> CMAResponse:
         explanation="Adjusted estimate based on requested changes.",
         cma_run_id=new_run_id,
     )
+
+
+# ------------------------------ Debug ---------------------------------
+@app.get("/debug/rentcast")
+async def debug_rentcast(address: str) -> Dict[str, Any]:
+    details = await fetch_property_details(address)
+    return {"address": address, "details": details}

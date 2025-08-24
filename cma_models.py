@@ -44,6 +44,7 @@ class Comp(BaseModel):
 
 class CMAResponse(BaseModel):
     estimate: float
+
                     subject: Subject
 
     comps: List[Comp]

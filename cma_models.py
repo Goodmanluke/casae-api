@@ -44,6 +44,8 @@ class Comp(BaseModel):
 
 class CMAResponse(BaseModel):
     estimate: float
+                    subject: Subject
+
     comps: List[Comp]
     explanation: str
     cma_run_id: str

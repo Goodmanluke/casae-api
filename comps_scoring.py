@@ -52,10 +52,11 @@ class Property:
     """Represents a real estate property and its salient attributes."""
 
     id: str
-    lat: float
-    lng: float
-    property_type: str
-    living_sqft: float
+    address: str = ""  # Add address field
+    lat: float = 0.0
+    lng: float = 0.0
+    property_type: str = "SFR"
+    living_sqft: float = 0.0
     lot_sqft: Optional[float] = None
     beds: int = 0
     baths: int = 0

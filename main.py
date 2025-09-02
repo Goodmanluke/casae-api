@@ -627,13 +627,23 @@ async def cma_adjust(
                     logger.error(f"[CMA Adjust] Error processing comp {comp.id}: {e}")
                     continue
             
-            return CMAResponse(
-                estimate=adjusted_estimate,
-                subject=adjusted_subject,
-                comps=comps_for_response,
-                explanation=adjusted_narrative,
-                cma_run_id=cma_run_id,  # Keep same run ID to link with original
-            )
+                    # Persist adjusted data for later PDF generation
+        try:
+            cma_runs_storage[cma_run_id]["adjusted"] = {
+                "estimate": adjusted_estimate,
+                "subject": adjusted_subject,
+                "comps": original_comps,
+            }
+        except Exception:
+            pass
+
+        return CMAResponse(
+            estimate=adjusted_estimate,
+            subject=adjusted_subject,
+            comps=comps_for_response,
+            explanation=adjusted_narrative,
+            cma_run_id=cma_run_id,  # Keep same run ID to link with original
+        )
         
     except Exception as e:
         logger.error(f"[CMA Adjust] AI adjustment failed: {e}")
@@ -705,6 +715,16 @@ async def cma_adjust(
                 logger.error(f"[CMA Adjust] Error processing comp {comp.id}: {e}")
                 continue
         
+        # Persist adjusted data for later PDF generation (fallback path)
+        try:
+            cma_runs_storage[cma_run_id]["adjusted"] = {
+                "estimate": adjusted_estimate,
+                "subject": adjusted_subject,
+                "comps": original_comps,
+            }
+        except Exception:
+            pass
+
         return CMAResponse(
             estimate=adjusted_estimate,
             subject=adjusted_subject,
@@ -775,18 +795,31 @@ async def rent_estimate(address: str) -> Dict[str, Any]:
 
 # ---------------- PDF Generation ----------------
 @app.get("/pdfx")
-async def generate_cma_pdf(cma_run_id: str):
-    """Generate a PDF report for a CMA run."""
-    logger.info(f"[PDF] Generating PDF for CMA run: {cma_run_id}")
+async def generate_cma_pdf(cma_run_id: str, adjusted: Optional[bool] = False):
+    """Generate a PDF report for a CMA run.
+
+    If adjusted=true and adjusted data exists, use adjusted; else baseline.
+    """
+    logger.info(f"[PDF] Generating PDF for CMA run: {cma_run_id}, adjusted={adjusted}")
     
     # Get the CMA run data
-    cma_run = _load_cma_run(cma_run_id)
-    if not cma_run:
+    base_run = _load_cma_run(cma_run_id)
+    if not base_run:
         raise HTTPException(status_code=404, detail="CMA run not found")
+
+    run_for_pdf = base_run
+    if adjusted and base_run.get("adjusted"):
+        adj = base_run["adjusted"]
+        # Normalize shape back to what create_cma_pdf expects
+        run_for_pdf = {
+            "subject": adj["subject"],
+            "estimate": adj["estimate"],
+            "comps": adj["comps"],
+        }
     
     try:
         # Generate PDF using the existing pdf_utils module
-        pdf_bytes = create_cma_pdf(cma_run_id, cma_run)
+        pdf_bytes = create_cma_pdf(cma_run_id, run_for_pdf)
         
         logger.info(f"[PDF] Successfully generated PDF, size: {len(pdf_bytes)} bytes")
         
@@ -796,7 +829,7 @@ async def generate_cma_pdf(cma_run_id: str):
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f"attachment; filename=cma_report_{cma_run_id}.pdf"
+                "Content-Disposition": f"attachment; filename=cma_report_{cma_run_id}{'_adjusted' if adjusted else ''}.pdf"
             }
         )
         

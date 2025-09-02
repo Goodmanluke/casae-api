@@ -61,17 +61,23 @@ async def compute_adjusted_cma(subject: Dict[str, Any], comps: List[Dict[str, An
         "comps": comps,
     }
     try:
-        response = await openai.ChatCompletion.acreate(
+        # Check if OpenAI API key is available
+        if not openai.api_key:
+            print("WARNING: OPENAI_API_KEY not set")
+            return default_result
+            
+        response = await openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are a real estate CMA assistant."},
                 {"role": "user", "content": prompt},
             ],
-            response_format="json",
+            response_format={"type": "json_object"},
             timeout=10,
         )
         return _safe_json(response.choices[0].message["content"], default_result)
-    except Exception:
+    except Exception as e:
+        print(f"AI function error: {e}")
         return default_result
 
 async def generate_cma_summary(subject: Dict[str, Any], comps: List[Dict[str, Any]], adjustments: Dict[str, Any], value: int) -> str:

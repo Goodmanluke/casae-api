@@ -531,6 +531,7 @@ async def cma_adjust(
     # Use AI to compute adjusted value
     try:
         logger.info(f"[CMA Adjust] Attempting AI adjustment with: subject={subject_prop.address}, comps_count={len(original_comps)}, adjustments={adjustments}")
+        logger.info(f"[CMA Adjust] OpenAI API key present: {bool(os.getenv('OPENAI_API_KEY'))}")
         
         # Convert Property objects to dictionaries safely
         subject_dict = {
@@ -574,62 +575,65 @@ async def cma_adjust(
         logger.info(f"[CMA Adjust] AI result: {ai_result}")
         
         adjusted_estimate = ai_result.get("value")
+        logger.info(f"[CMA Adjust] AI returned value: {adjusted_estimate}")
+        
         if adjusted_estimate is None or adjusted_estimate <= 0:
-            adjusted_estimate = original_estimate
-            logger.warning(f"[CMA Adjust] AI returned invalid value: {adjusted_estimate}, using original: {original_estimate}")
-        reasoning = ai_result.get("reasoning", "Adjustments applied using AI analysis")
-        
-        # Create adjusted subject property
-        adjusted_subject = Subject(
-            address=subject_prop.address,
-            lat=subject_prop.lat,
-            lng=subject_prop.lng,
-            property_type=subject_prop.property_type,
-            living_sqft=(subject_prop.living_sqft or 0) + add_sqft,
-            lot_sqft=subject_prop.lot_sqft,
-            beds=(subject_prop.beds or 0) + add_beds,
-            baths=(subject_prop.baths or 0) + add_baths,
-            year_built=subject_prop.year_built,
-            condition=condition or subject_prop.condition_rating
-        )
-        
-        # Generate new narrative for adjusted property
-        adjusted_narrative = generate_ai_narrative(adjusted_subject, adjusted_estimate, original_comps)
-        
-        # Convert stored tuples back to Comp objects for the response
-        comps_for_response = []
-        for comp, score in original_comps:
-            try:
-                distance = None
-                if subject_prop.lat and subject_prop.lng and comp.lat and comp.lng:
-                    distance = calculate_distance(subject_prop.lat, subject_prop.lng, comp.lat, comp.lng)
-                
-                comps_for_response.append(Comp(
-                    id=str(comp.id),
-                    address=getattr(comp, 'address', 'Unknown Address'),
-                    raw_price=comp.raw_price,
-                    living_sqft=comp.living_sqft,
-                    beds=comp.beds,
-                    baths=comp.baths,
-                    year_built=comp.year_built,
-                    lot_sqft=comp.lot_sqft,
-                    distance_mi=distance,
-                    similarity=score,
-                    photo_url=get_property_photo_url(getattr(comp, 'address', 'Unknown Address'))
-                ))
-            except Exception as e:
-                logger.error(f"[CMA Adjust] Error processing comp {comp.id}: {e}")
-                continue
-        
-        logger.info(f"[CMA Adjust] AI adjustment successful: original={original_estimate}, adjusted={adjusted_estimate}")
-        
-        return CMAResponse(
-            estimate=adjusted_estimate,
-            subject=adjusted_subject,
-            comps=comps_for_response,
-            explanation=adjusted_narrative,
-            cma_run_id=cma_run_id,  # Keep same run ID to link with original
-        )
+            logger.warning(f"[CMA Adjust] AI returned invalid value: {adjusted_estimate}, using fallback calculation")
+            # Force fallback calculation by raising an exception
+            raise Exception("AI adjustment failed, using fallback")
+        else:
+            logger.info(f"[CMA Adjust] AI adjustment successful: original={original_estimate}, adjusted={adjusted_estimate}")
+            reasoning = ai_result.get("reasoning", "Adjustments applied using AI analysis")
+            
+            # Create adjusted subject property
+            adjusted_subject = Subject(
+                address=subject_prop.address,
+                lat=subject_prop.lat,
+                lng=subject_prop.lng,
+                property_type=subject_prop.property_type,
+                living_sqft=(subject_prop.living_sqft or 0) + add_sqft,
+                lot_sqft=subject_prop.lot_sqft,
+                beds=(subject_prop.beds or 0) + add_beds,
+                baths=(subject_prop.baths or 0) + add_baths,
+                year_built=subject_prop.year_built,
+                condition=condition or subject_prop.condition_rating
+            )
+            
+            # Generate new narrative for adjusted property
+            adjusted_narrative = generate_ai_narrative(adjusted_subject, adjusted_estimate, original_comps)
+            
+            # Convert stored tuples back to Comp objects for the response
+            comps_for_response = []
+            for comp, score in original_comps:
+                try:
+                    distance = None
+                    if subject_prop.lat and subject_prop.lng and comp.lat and comp.lng:
+                        distance = calculate_distance(subject_prop.lat, subject_prop.lng, comp.lat, comp.lng)
+                    
+                    comps_for_response.append(Comp(
+                        id=str(comp.id),
+                        address=getattr(comp, 'address', 'Unknown Address'),
+                        raw_price=comp.raw_price,
+                        living_sqft=comp.living_sqft,
+                        beds=comp.beds,
+                        baths=comp.baths,
+                        year_built=comp.year_built,
+                        lot_sqft=comp.lot_sqft,
+                        distance_mi=distance,
+                        similarity=score,
+                        photo_url=get_property_photo_url(getattr(comp, 'address', 'Unknown Address'))
+                    ))
+                except Exception as e:
+                    logger.error(f"[CMA Adjust] Error processing comp {comp.id}: {e}")
+                    continue
+            
+            return CMAResponse(
+                estimate=adjusted_estimate,
+                subject=adjusted_subject,
+                comps=comps_for_response,
+                explanation=adjusted_narrative,
+                cma_run_id=cma_run_id,  # Keep same run ID to link with original
+            )
         
     except Exception as e:
         logger.error(f"[CMA Adjust] AI adjustment failed: {e}")
@@ -660,6 +664,7 @@ async def cma_adjust(
         
         logger.info(f"[CMA Adjust] Fallback calculation: original={original_estimate}, multiplier={adjustment_multiplier}, adjusted={adjusted_estimate}")
         logger.info(f"[CMA Adjust] Adjustment breakdown: condition={condition}, renovations={renovations}, add_beds={add_beds}, add_baths={add_baths}, add_sqft={add_sqft}")
+        logger.info(f"[CMA Adjust] Using fallback calculation - AI failed")
         
         # Create adjusted subject property
         adjusted_subject = Subject(

@@ -475,9 +475,23 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     narrative = generate_ai_narrative(subject_prop, estimate, scored)
 
     try:
+        # Build enriched subject from subject_prop for accurate snapshot display
+        enriched_subject = Subject(
+            address=subject_prop.address,
+            lat=subject_prop.lat or 0.0,
+            lng=subject_prop.lng or 0.0,
+            property_type=subject_prop.property_type,
+            beds=subject_prop.beds or 0,
+            baths=float(subject_prop.baths or 0),
+            sqft=int(subject_prop.living_sqft or 0),
+            year_built=subject_prop.year_built,
+            lot_sqft=int(subject_prop.lot_sqft or 0) if subject_prop.lot_sqft else None,
+            condition=s.condition,
+        )
+
         return CMAResponse(
             estimate=estimate,
-            subject=s,
+            subject=enriched_subject,
             comps=comps_with_distance,
             explanation=narrative,
             cma_run_id=run_id,

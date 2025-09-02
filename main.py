@@ -530,13 +530,53 @@ async def cma_adjust(
     
     # Use AI to compute adjusted value
     try:
+        logger.info(f"[CMA Adjust] Attempting AI adjustment with: subject={subject_prop.address}, comps_count={len(original_comps)}, adjustments={adjustments}")
+        
+        # Convert Property objects to dictionaries safely
+        subject_dict = {
+            'address': subject_prop.address,
+            'lat': subject_prop.lat,
+            'lng': subject_prop.lng,
+            'property_type': subject_prop.property_type,
+            'living_sqft': subject_prop.living_sqft,
+            'lot_sqft': subject_prop.lot_sqft,
+            'beds': subject_prop.beds,
+            'baths': subject_prop.baths,
+            'year_built': subject_prop.year_built,
+            'condition_rating': subject_prop.condition_rating,
+            'raw_price': subject_prop.raw_price
+        }
+        
+        comps_dicts = []
+        for comp, _ in original_comps:
+            comp_dict = {
+                'id': comp.id,
+                'address': comp.address,
+                'lat': comp.lat,
+                'lng': comp.lng,
+                'property_type': comp.property_type,
+                'living_sqft': comp.living_sqft,
+                'lot_sqft': comp.lot_sqft,
+                'beds': comp.beds,
+                'baths': comp.baths,
+                'year_built': comp.year_built,
+                'condition_rating': comp.condition_rating,
+                'raw_price': comp.raw_price
+            }
+            comps_dicts.append(comp_dict)
+        
         ai_result = await compute_adjusted_cma(
-            subject_prop.__dict__,
-            [comp.__dict__ for comp, _ in original_comps],  # Extract Property objects from tuples
+            subject_dict,
+            comps_dicts,
             adjustments
         )
         
-        adjusted_estimate = ai_result.get("value", original_estimate)
+        logger.info(f"[CMA Adjust] AI result: {ai_result}")
+        
+        adjusted_estimate = ai_result.get("value")
+        if adjusted_estimate is None or adjusted_estimate <= 0:
+            adjusted_estimate = original_estimate
+            logger.warning(f"[CMA Adjust] AI returned invalid value: {adjusted_estimate}, using original: {original_estimate}")
         reasoning = ai_result.get("reasoning", "Adjustments applied using AI analysis")
         
         # Create adjusted subject property
@@ -581,6 +621,8 @@ async def cma_adjust(
                 logger.error(f"[CMA Adjust] Error processing comp {comp.id}: {e}")
                 continue
         
+        logger.info(f"[CMA Adjust] AI adjustment successful: original={original_estimate}, adjusted={adjusted_estimate}")
+        
         return CMAResponse(
             estimate=adjusted_estimate,
             subject=adjusted_subject,
@@ -594,7 +636,7 @@ async def cma_adjust(
         # Fallback: simple percentage adjustments
         adjustment_multiplier = 1.0
         
-        # Condition adjustments
+        # Condition adjustments (multiplicative)
         if condition == "Poor":
             adjustment_multiplier *= 0.85
         elif condition == "Fair":
@@ -602,19 +644,22 @@ async def cma_adjust(
         elif condition == "Excellent":
             adjustment_multiplier *= 1.15
             
-        # Renovation adjustments
-        renovation_bonus = len(renovations or []) * 0.05
-        adjustment_multiplier += renovation_bonus
+        # Renovation adjustments (multiplicative)
+        renovation_bonus = 1.0 + (len(renovations or []) * 0.05)
+        adjustment_multiplier *= renovation_bonus
         
-        # Size adjustments (rough estimates)
+        # Size adjustments (multiplicative)
         if add_beds > 0:
-            adjustment_multiplier += add_beds * 0.08
+            adjustment_multiplier *= (1.0 + add_beds * 0.08)
         if add_baths > 0:
-            adjustment_multiplier += add_baths * 0.06
+            adjustment_multiplier *= (1.0 + add_baths * 0.06)
         if add_sqft > 0:
-            adjustment_multiplier += (add_sqft / 1000) * 0.1
+            adjustment_multiplier *= (1.0 + (add_sqft / 1000) * 0.1)
             
         adjusted_estimate = round(original_estimate * adjustment_multiplier, 0)
+        
+        logger.info(f"[CMA Adjust] Fallback calculation: original={original_estimate}, multiplier={adjustment_multiplier}, adjusted={adjusted_estimate}")
+        logger.info(f"[CMA Adjust] Adjustment breakdown: condition={condition}, renovations={renovations}, add_beds={add_beds}, add_baths={add_baths}, add_sqft={add_sqft}")
         
         # Create adjusted subject property
         adjusted_subject = Subject(

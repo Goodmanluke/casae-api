@@ -56,7 +56,7 @@ async def compute_adjusted_cma(subject: Dict[str, Any], comps: List[Dict[str, An
     Respond in JSON: {{ "value": <adjusted value>, "reasoning": <explanation>, "comps": <list or null> }}
     """
     default_result = {
-        "value": subject.get("avm_value", 0),
+        "value": 0,  # Will be overridden by caller
         "reasoning": "AI unavailable – baseline estimate used.",
         "comps": comps,
     }

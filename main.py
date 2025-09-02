@@ -516,6 +516,9 @@ async def cma_adjust(
     original_comps = original_run["comps"]
     original_estimate = original_run["estimate"]
     
+    logger.info(f"[CMA Adjust] Retrieved run: subject={subject_prop.address}, comps_count={len(original_comps)}, estimate={original_estimate}")
+    logger.info(f"[CMA Adjust] Comps type: {type(original_comps)}, first comp: {original_comps[0] if original_comps else 'None'}")
+    
     # Create adjustments dict for AI processing
     adjustments = {
         "condition": condition,
@@ -529,7 +532,7 @@ async def cma_adjust(
     try:
         ai_result = await compute_adjusted_cma(
             subject_prop.__dict__,
-            [comp.__dict__ for comp in original_comps],
+            [comp.__dict__ for comp, _ in original_comps],  # Extract Property objects from tuples
             adjustments
         )
         
@@ -553,10 +556,35 @@ async def cma_adjust(
         # Generate new narrative for adjusted property
         adjusted_narrative = generate_ai_narrative(adjusted_subject, adjusted_estimate, original_comps)
         
+        # Convert stored tuples back to Comp objects for the response
+        comps_for_response = []
+        for comp, score in original_comps:
+            try:
+                distance = None
+                if subject_prop.lat and subject_prop.lng and comp.lat and comp.lng:
+                    distance = calculate_distance(subject_prop.lat, subject_prop.lng, comp.lat, comp.lng)
+                
+                comps_for_response.append(Comp(
+                    id=str(comp.id),
+                    address=getattr(comp, 'address', 'Unknown Address'),
+                    raw_price=comp.raw_price,
+                    living_sqft=comp.living_sqft,
+                    beds=comp.beds,
+                    baths=comp.baths,
+                    year_built=comp.year_built,
+                    lot_sqft=comp.lot_sqft,
+                    distance_mi=distance,
+                    similarity=score,
+                    photo_url=get_property_photo_url(getattr(comp, 'address', 'Unknown Address'))
+                ))
+            except Exception as e:
+                logger.error(f"[CMA Adjust] Error processing comp {comp.id}: {e}")
+                continue
+        
         return CMAResponse(
             estimate=adjusted_estimate,
             subject=adjusted_subject,
-            comps=original_run["comps"],  # Keep original comps for comparison
+            comps=comps_for_response,
             explanation=adjusted_narrative,
             cma_run_id=cma_run_id,  # Keep same run ID to link with original
         )
@@ -602,10 +630,35 @@ async def cma_adjust(
             condition=condition or subject_prop.condition_rating
         )
         
+        # Convert stored tuples back to Comp objects for the response
+        comps_for_response = []
+        for comp, score in original_comps:
+            try:
+                distance = None
+                if subject_prop.lat and subject_prop.lng and comp.lat and comp.lng:
+                    distance = calculate_distance(subject_prop.lat, subject_prop.lng, comp.lat, comp.lng)
+                
+                comps_for_response.append(Comp(
+                    id=str(comp.id),
+                    address=getattr(comp, 'address', 'Unknown Address'),
+                    raw_price=comp.raw_price,
+                    living_sqft=comp.living_sqft,
+                    beds=comp.beds,
+                    baths=comp.baths,
+                    year_built=comp.year_built,
+                    lot_sqft=comp.lot_sqft,
+                    distance_mi=distance,
+                    similarity=score,
+                    photo_url=get_property_photo_url(getattr(comp, 'address', 'Unknown Address'))
+                ))
+            except Exception as e:
+                logger.error(f"[CMA Adjust] Error processing comp {comp.id}: {e}")
+                continue
+        
         return CMAResponse(
             estimate=adjusted_estimate,
             subject=adjusted_subject,
-            comps=original_run["comps"],
+            comps=comps_for_response,
             explanation=f"Applied adjustments using fallback calculation. New estimate: ${adjusted_estimate:,}",
             cma_run_id=cma_run_id,
         )

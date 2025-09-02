@@ -42,6 +42,7 @@ class Comp(BaseModel):
     lot_sqft: Optional[int]
     distance_mi: Optional[float]
     similarity: float
+    photo_url: Optional[str] = None
 
 
 class CMAResponse(BaseModel):

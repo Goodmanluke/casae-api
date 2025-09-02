@@ -288,23 +288,25 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     # Fetch property details from RentCast
     property_details = await fetch_property_details(s.address)
     
-    # Create subject property object
+    # Create subject property object with safe defaults
     subject_prop = Property(
         id=str(uuid4()),
         address=s.address,
-        lat=s.lat or (property_details.get("latitude") if property_details else None),
-        lng=s.lng or (property_details.get("longitude") if property_details else None),
+        lat=s.lat or (property_details.get("lat") if property_details else 0.0),
+        lng=s.lng or (property_details.get("lng") if property_details else 0.0),
         property_type=s.property_type or "SFR",
-        living_sqft=s.sqft or (property_details.get("livingArea") if property_details else None),
-        lot_sqft=s.lot_sqft or (property_details.get("lotSize") if property_details else None),
-        beds=s.beds or (property_details.get("bedrooms") if property_details else None),
-        baths=s.baths or (property_details.get("bathrooms") if property_details else None),
-        year_built=s.year_built or (property_details.get("yearBuilt") if property_details else None),
+        living_sqft=s.sqft or (property_details.get("sqft") if property_details else 0.0),
+        lot_sqft=s.lot_sqft or (property_details.get("lot_sqft") if property_details else None),
+        beds=s.beds or (property_details.get("beds") if property_details else 0),
+        baths=s.baths or (property_details.get("baths") if property_details else 0),
+        year_built=s.year_built or (property_details.get("year_built") if property_details else None),
         condition_rating=s.condition,
         features=set(),
         sale_date=None,
         raw_price=None,
     )
+    
+    logger.info(f"[CMA Baseline] Created subject property: living_sqft={subject_prop.living_sqft}, beds={subject_prop.beds}, baths={subject_prop.baths}")
 
     # -------------------------------------------------------------------
     # OPTIONAL: RentCast AVM value/comparables lookup

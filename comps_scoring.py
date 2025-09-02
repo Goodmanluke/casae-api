@@ -195,7 +195,7 @@ def filter_comps(
         if sale_date_max and comp.sale_date and comp.sale_date > sale_date_max:
             continue
         # Size tolerance filter
-        if comp.living_sqft:
+        if comp.living_sqft and subject_sqft:
             lower = subject_sqft * (1 - sqft_tol)
             upper = subject_sqft * (1 + sqft_tol)
             if comp.living_sqft < lower or comp.living_sqft > upper:

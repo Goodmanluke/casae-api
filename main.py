@@ -605,10 +605,10 @@ async def cma_adjust(
                 lat=subject_prop.lat,
                 lng=subject_prop.lng,
                 property_type=subject_prop.property_type,
-                living_sqft=(subject_prop.living_sqft or 0) + add_sqft,
-                lot_sqft=subject_prop.lot_sqft,
+                sqft=int((subject_prop.living_sqft or 0) + add_sqft),
+                lot_sqft=int(subject_prop.lot_sqft or 0) if subject_prop.lot_sqft else None,
                 beds=(subject_prop.beds or 0) + add_beds,
-                baths=(subject_prop.baths or 0) + add_baths,
+                baths=float((subject_prop.baths or 0) + add_baths),
                 year_built=subject_prop.year_built,
                 condition=condition or subject_prop.condition_rating
             )
@@ -696,10 +696,10 @@ async def cma_adjust(
             lat=subject_prop.lat,
             lng=subject_prop.lng,
             property_type=subject_prop.property_type,
-            living_sqft=(subject_prop.living_sqft or 0) + add_sqft,
-            lot_sqft=subject_prop.lot_sqft,
+            sqft=int((subject_prop.living_sqft or 0) + add_sqft),
+            lot_sqft=int(subject_prop.lot_sqft or 0) if subject_prop.lot_sqft else None,
             beds=(subject_prop.beds or 0) + add_beds,
-            baths=(subject_prop.baths or 0) + add_baths,
+            baths=float((subject_prop.baths or 0) + add_baths),
             year_built=subject_prop.year_built,
             condition=condition or subject_prop.condition_rating
         )

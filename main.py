@@ -773,6 +773,38 @@ async def rent_estimate(address: str) -> Dict[str, Any]:
         logger.exception("Rent estimate exception: %s", e)
         return {"monthly_rent": None, "error": "exception"}
 
+# ---------------- PDF Generation ----------------
+@app.get("/pdfx")
+async def generate_cma_pdf(cma_run_id: str):
+    """Generate a PDF report for a CMA run."""
+    logger.info(f"[PDF] Generating PDF for CMA run: {cma_run_id}")
+    
+    # Get the CMA run data
+    cma_run = _load_cma_run(cma_run_id)
+    if not cma_run:
+        raise HTTPException(status_code=404, detail="CMA run not found")
+    
+    try:
+        # Generate PDF using the existing pdf_utils module
+        pdf_bytes = create_cma_pdf(cma_run_id, cma_run)
+        
+        logger.info(f"[PDF] Successfully generated PDF, size: {len(pdf_bytes)} bytes")
+        
+        # Return PDF as response with proper headers
+        from fastapi.responses import Response
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename=cma_report_{cma_run_id}.pdf"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"[PDF] Failed to generate PDF: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {str(e)}")
+
+
 # ---------------- Saved searches (placeholder) ----------------
 @app.get("/searches/list")
 async def list_saved_searches(user_id: str) -> Dict[str, Any]:

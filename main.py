@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Tuple, Any
 import os
@@ -75,6 +75,11 @@ def _save_cma_run(run_id: str, subject: Property, comps: List[Tuple[Property, fl
 
 def _load_cma_run(run_id: str) -> Optional[Dict[str, Any]]:
     return cma_runs_storage.get(run_id)
+
+
+def _get_cma_run(run_id: str) -> Optional[Dict[str, Any]]:
+    """Get a CMA run by ID (alias for _load_cma_run for consistency)"""
+    return _load_cma_run(run_id)
 
 
 # ---------------- Utility functions ----------------
@@ -278,65 +283,28 @@ async def fetch_property_details(address: str) -> Optional[Dict[str, Any]]:
 @app.post("/cma/baseline", response_model=CMAResponse)
 async def cma_baseline(payload: CMAInput) -> CMAResponse:
     s = payload.subject
-    logger.info("[CMA Baseline] address=%s", getattr(s, "address", None))
+    logger.info(f"[CMA Baseline] Processing address: {s.address}")
 
-    try:
-        if not s.beds or not s.baths or not s.sqft:
-            logger.info(f"[CMA Baseline] Fetching property details for {s.address}")
-            details = await fetch_property_details(s.address)
-            if details:
-                logger.info(f"[CMA Baseline] Received details: {details}")
-                s.beds = s.beds or details.get("beds")
-                s.baths = s.baths or details.get("baths")
-                s.sqft = s.sqft or details.get("sqft")
-                s.year_built = s.year_built or details.get("year_built")
-                s.lot_sqft = s.lot_sqft or details.get("lot_sqft")
-                s.lat = s.lat or details.get("lat")
-                s.lng = s.lng or details.get("lng")
-                logger.info(f"[CMA Baseline] Updated subject: beds={s.beds}, baths={s.baths}, sqft={s.sqft}, year_built={s.year_built}")
-            else:
-                logger.warning(f"[CMA Baseline] No property details found for {s.address}")
-                # Fallback to sample data if no details found
-                logger.info(f"[CMA Baseline] Using fallback sample data")
-                s.beds = s.beds or 3
-                s.baths = s.baths or 2
-                s.sqft = s.sqft or 1500
-                s.year_built = s.year_built or 2000
-                s.lot_sqft = s.lot_sqft or 6000
-        else:
-            logger.info(f"[CMA Baseline] Using provided subject details: beds={s.beds}, baths={s.baths}, sqft={s.sqft}, year_built={s.year_built}")
-    except Exception as e:
-        logger.exception(f"[CMA Baseline] Error fetching property details: {e}")
-        # Fallback to sample data on error
-        logger.info(f"[CMA Baseline] Using fallback sample data due to error")
-        s.beds = s.beds or 3
-        s.baths = s.baths or 2
-        s.sqft = s.sqft or 1500
-        s.year_built = s.year_built or 2000
-        s.lot_sqft = s.lot_sqft or 6000
-        pass
-
-    # Subject property
+    # Fetch property details from RentCast
+    property_details = await fetch_property_details(s.address)
+    
+    # Create subject property object
     subject_prop = Property(
-        id="subject",
-        address=s.address,  # Add address
-        lat=float(getattr(s, "lat", 0.0)),
-        lng=float(getattr(s, "lng", 0.0)),
-        property_type="SFR",
-        living_sqft=float(s.sqft or 0),
-        lot_sqft=float(s.lot_sqft) if s.lot_sqft else None,
-        beds=int(s.beds or 0),
-        baths=float(s.baths or 0),
-        year_built=int(s.year_built or 0),
-        condition_rating=None,
+        id=str(uuid4()),
+        address=s.address,
+        lat=s.lat or (property_details.get("latitude") if property_details else None),
+        lng=s.lng or (property_details.get("longitude") if property_details else None),
+        property_type=s.property_type or "SFR",
+        living_sqft=s.sqft or (property_details.get("livingArea") if property_details else None),
+        lot_sqft=s.lot_sqft or (property_details.get("lotSize") if property_details else None),
+        beds=s.beds or (property_details.get("bedrooms") if property_details else None),
+        baths=s.baths or (property_details.get("bathrooms") if property_details else None),
+        year_built=s.year_built or (property_details.get("yearBuilt") if property_details else None),
+        condition_rating=s.condition,
         features=set(),
         sale_date=None,
         raw_price=None,
-        market_index_geo=None,
     )
-    
-    # Log the subject property details for debugging
-    logger.info(f"[CMA Baseline] Subject property details: beds={s.beds}, baths={s.baths}, sqft={s.sqft}, year_built={s.year_built}")
 
     # -------------------------------------------------------------------
     # OPTIONAL: RentCast AVM value/comparables lookup
@@ -427,7 +395,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
                     id=str(comp.get("id") or comp.get("propertyId") or comp.get("mlsId") or uuid4()),
                     address=str(comp.get("address") or comp.get("formattedAddress") or "Unknown Address"),
                     lat=float(_gf(comp, "lat", "latitude") or 0.0),
-                    lng=float(_gf(comp, "lng", "longitude") or 0.0),
+                    lng=float(_gf(comp, "lapshot_sqft") or 0.0),
                     property_type=str(comp.get("propertyType") or "SFR"),
                     living_sqft=float(_gi(comp, "livingArea", "squareFootage", "sqft") or 0),
                     lot_sqft=float(_gi(comp, "lotSize", "lot_sqft") or 0) or None,
@@ -438,31 +406,32 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
                     features=set(),
                     sale_date=None,
                     raw_price=_gp(comp),
-                    market_index_geo=None,
-                )
-            )
-    else:
-        for entry in comps_data:
-            comps_list.append(
-                Property(
-                    id=str(entry["id"]),
-                    address=entry["address"],  # Add address from sample data
-                    lat=0.0,
-                    lng=0.0,
-                    property_type="SFR",
-                    living_sqft=entry["sqft"],
-                    lot_sqft=entry["lot_size"],
-                    beds=entry["beds"],
-                    baths=entry["baths"],
-                    year_built=entry["year_built"],
-                    condition_rating=None,
-                    features=set(),
-                    sale_date=None,
-                    raw_price=entry["price"],
-                    market_index_geo=None,
                 )
             )
 
+    # Fallback to sample data if no RentCast comps
+    if not comps_list:
+        comps_list = [
+            Property(
+                id=str(comp["id"]),
+                address=comp["address"],
+                lat=0.0,
+                lng=0.0,
+                property_type="SFR",
+                living_sqft=comp["sqft"],
+                lot_sqft=comp["lot_size"],
+                beds=comp["beds"],
+                baths=comp["baths"],
+                year_built=comp["year_built"],
+                condition_rating=None,
+                features=set(),
+                sale_date=None,
+                raw_price=comp["price"],
+            )
+            for comp in comps_data
+        ]
+
+    # Find best comps using scoring algorithm
     _, scored = find_comps(subject_prop, comps_list, {}, default_weights, {}, 5)
     total_price, total_weight = 0.0, 0.0
     for comp, score in scored:
@@ -520,6 +489,123 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
             comps=[],
             explanation="Error processing property details. Please try again.",
             cma_run_id=run_id,
+        )
+
+
+# ---------------- CMA Adjust ----------------
+@app.get("/cma/adjust", response_model=CMAResponse)
+async def cma_adjust(
+    cma_run_id: str,
+    condition: Optional[str] = None,
+    renovations: Optional[List[str]] = None,
+    add_beds: int = 0,
+    add_baths: float = 0.0,
+    add_sqft: int = 0
+) -> CMAResponse:
+    """Apply adjustments to an existing CMA run and return adjusted estimate."""
+    logger.info(f"[CMA Adjust] Processing adjustments for run: {cma_run_id}")
+    
+    # Get the original CMA run
+    original_run = _load_cma_run(cma_run_id)
+    if not original_run:
+        raise HTTPException(status_code=404, detail="CMA run not found")
+    
+    subject_prop = original_run["subject"]
+    original_comps = original_run["comps"]
+    original_estimate = original_run["estimate"]
+    
+    # Create adjustments dict for AI processing
+    adjustments = {
+        "condition": condition,
+        "renovations": renovations or [],
+        "add_beds": add_beds,
+        "add_baths": add_baths,
+        "add_sqft": add_sqft
+    }
+    
+    # Use AI to compute adjusted value
+    try:
+        ai_result = await compute_adjusted_cma(
+            subject_prop.__dict__,
+            [comp.__dict__ for comp in original_comps],
+            adjustments
+        )
+        
+        adjusted_estimate = ai_result.get("value", original_estimate)
+        reasoning = ai_result.get("reasoning", "Adjustments applied using AI analysis")
+        
+        # Create adjusted subject property
+        adjusted_subject = Subject(
+            address=subject_prop.address,
+            lat=subject_prop.lat,
+            lng=subject_prop.lng,
+            property_type=subject_prop.property_type,
+            living_sqft=(subject_prop.living_sqft or 0) + add_sqft,
+            lot_sqft=subject_prop.lot_sqft,
+            beds=(subject_prop.beds or 0) + add_beds,
+            baths=(subject_prop.baths or 0) + add_baths,
+            year_built=subject_prop.year_built,
+            condition=condition or subject_prop.condition_rating
+        )
+        
+        # Generate new narrative for adjusted property
+        adjusted_narrative = generate_ai_narrative(adjusted_subject, adjusted_estimate, original_comps)
+        
+        return CMAResponse(
+            estimate=adjusted_estimate,
+            subject=adjusted_subject,
+            comps=original_run["comps"],  # Keep original comps for comparison
+            explanation=adjusted_narrative,
+            cma_run_id=cma_run_id,  # Keep same run ID to link with original
+        )
+        
+    except Exception as e:
+        logger.error(f"[CMA Adjust] AI adjustment failed: {e}")
+        # Fallback: simple percentage adjustments
+        adjustment_multiplier = 1.0
+        
+        # Condition adjustments
+        if condition == "Poor":
+            adjustment_multiplier *= 0.85
+        elif condition == "Fair":
+            adjustment_multiplier *= 0.92
+        elif condition == "Excellent":
+            adjustment_multiplier *= 1.15
+            
+        # Renovation adjustments
+        renovation_bonus = len(renovations or []) * 0.05
+        adjustment_multiplier += renovation_bonus
+        
+        # Size adjustments (rough estimates)
+        if add_beds > 0:
+            adjustment_multiplier += add_beds * 0.08
+        if add_baths > 0:
+            adjustment_multiplier += add_baths * 0.06
+        if add_sqft > 0:
+            adjustment_multiplier += (add_sqft / 1000) * 0.1
+            
+        adjusted_estimate = round(original_estimate * adjustment_multiplier, 0)
+        
+        # Create adjusted subject property
+        adjusted_subject = Subject(
+            address=subject_prop.address,
+            lat=subject_prop.lat,
+            lng=subject_prop.lng,
+            property_type=subject_prop.property_type,
+            living_sqft=(subject_prop.living_sqft or 0) + add_sqft,
+            lot_sqft=subject_prop.lot_sqft,
+            beds=(subject_prop.beds or 0) + add_beds,
+            baths=(subject_prop.baths or 0) + add_baths,
+            year_built=subject_prop.year_built,
+            condition=condition or subject_prop.condition_rating
+        )
+        
+        return CMAResponse(
+            estimate=adjusted_estimate,
+            subject=adjusted_subject,
+            comps=original_run["comps"],
+            explanation=f"Applied adjustments using fallback calculation. New estimate: ${adjusted_estimate:,}",
+            cma_run_id=cma_run_id,
         )
 
 

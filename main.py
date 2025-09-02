@@ -7,7 +7,7 @@ import time
 import logging
 import httpx
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, date
 from uuid import uuid4
 import math
 

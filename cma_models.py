@@ -6,11 +6,13 @@ class Subject(BaseModel):
     address: str
     lat: float = 0.0
     lng: float = 0.0
+    property_type: str = "SFR"  # Single Family Residential
     beds: Optional[int] = None
     baths: Optional[float] = None
     sqft: Optional[int] = None
     year_built: Optional[int] = None
     lot_sqft: Optional[int] = None
+    condition: Optional[str] = None  # Poor, Fair, Good, Excellent
 
 
 class CMAInput(BaseModel):

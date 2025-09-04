@@ -13,7 +13,7 @@ pip install -r requirements.txt
 ```
 
 Run the application locally:
-
+en
 ```bash
 uvicorn main:app --reload --port 8000
 ```

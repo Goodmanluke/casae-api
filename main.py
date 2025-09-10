@@ -44,6 +44,50 @@ app.add_middleware(
 
 logger = logging.getLogger("uvicorn.error")
 
+# ---------------- RentCast AVM Configuration for Maximum Accuracy ----------------
+class RentCastConfig:
+    """Configuration class for RentCast AVM parameters to maximize accuracy"""
+    
+    # Default parameters based on RentCast documentation and website defaults
+    DEFAULT_COMP_COUNT = 20    # More comparables = better accuracy
+    DEFAULT_MAX_RADIUS = 5     # 5-mile radius (RentCast website default)
+    DEFAULT_DAYS_OLD = 270     # 270 days lookback (RentCast website default)
+    
+    # Property type mapping for consistent API calls
+    PROPERTY_TYPE_MAP = {
+        "SFR": "Single Family",
+        "Single Family": "Single Family", 
+        "Condo": "Condo",
+        "Townhouse": "Townhouse",
+        "Multi-Family": "Multi-Family",
+        "Apartment": "Apartment"
+    }
+    
+    @classmethod
+    def get_avm_params(cls, address: str, property_type: str = None, 
+                      bedrooms: int = None, bathrooms: float = None, 
+                      square_footage: int = None) -> dict:
+        """Build optimized AVM parameters for maximum accuracy"""
+        params = {
+            "address": address,
+            "lookupSubjectAttributes": "true",  # Enable automatic property lookup
+            "compCount": cls.DEFAULT_COMP_COUNT,
+            "maxRadius": cls.DEFAULT_MAX_RADIUS,
+            "daysOld": cls.DEFAULT_DAYS_OLD,
+        }
+        
+        # Add property details if available - these override automatic lookup
+        if property_type:
+            params["propertyType"] = cls.PROPERTY_TYPE_MAP.get(property_type, property_type)
+        if bedrooms and bedrooms > 0:
+            params["bedrooms"] = bedrooms
+        if bathrooms and bathrooms > 0:
+            params["bathrooms"] = bathrooms
+        if square_footage and square_footage > 0:
+            params["squareFootage"] = square_footage
+            
+        return params
+
 # ---------------- Supabase config ----------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
@@ -309,7 +353,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     logger.info(f"[CMA Baseline] Created subject property: living_sqft={subject_prop.living_sqft}, beds={subject_prop.beds}, baths={subject_prop.baths}")
 
     # -------------------------------------------------------------------
-    # OPTIONAL: RentCast AVM value/comparables lookup
+    # ENHANCED: RentCast AVM value/comparables lookup with accuracy improvements
     # Controlled via RENTCAST_USE_AVM=1 and RENTCAST_API_KEY
     # -------------------------------------------------------------------
     use_avm = os.getenv("RENTCAST_USE_AVM") == "1"
@@ -319,32 +363,69 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
         api_key = os.getenv("RENTCAST_API_KEY")
         if api_key:
             try:
-                async with httpx.AsyncClient(timeout=10) as client:
+                logger.info(f"[AVM] Making enhanced AVM request for: {s.address}")
+                
+                # Build enhanced parameters using configuration class
+                avm_params = RentCastConfig.get_avm_params(
+                    address=s.address,
+                    property_type=s.property_type,
+                    bedrooms=s.beds,
+                    bathrooms=s.baths,
+                    square_footage=s.sqft
+                )
+                    
+                # Enhance with property_details from RentCast if user didn't provide complete info
+                if property_details:
+                    if not s.beds and property_details.get("beds"):
+                        avm_params["bedrooms"] = property_details["beds"]
+                    if not s.baths and property_details.get("baths"):
+                        avm_params["bathrooms"] = property_details["baths"]
+                    if not s.sqft and property_details.get("sqft"):
+                        avm_params["squareFootage"] = property_details["sqft"]
+                
+                logger.info(f"[AVM] Request parameters: {avm_params}")
+                
+                async with httpx.AsyncClient(timeout=15) as client:  # Increased timeout for more accurate results
                     resp = await client.get(
                         "https://api.rentcast.io/v1/avm/value",
-                        params={
-                            "address": s.address,
-                            "beds": s.beds or "",
-                            "baths": s.baths or "",
-                            "squareFootage": s.sqft or "",
-                        },
+                        params=avm_params,
                         headers={"X-Api-Key": api_key},
                     )
+                    
+                logger.info(f"[AVM] Response status: {resp.status_code}")
+                
                 if resp.status_code == 200:
                     data = resp.json()
-                    price_key_candidates = ["price", "value", "estimate"]
+                    logger.info(f"[AVM] Raw response keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+                    
+                    # Enhanced price extraction - RentCast uses 'price' as primary field
+                    price_key_candidates = ["price", "value", "estimate", "priceEstimate"]
                     for k in price_key_candidates:
                         v = data.get(k)
-                        if isinstance(v, (int, float)):
+                        if isinstance(v, (int, float)) and v > 0:
                             avm_estimate = float(v)
+                            logger.info(f"[AVM] Found estimate: ${avm_estimate:,.0f} from field '{k}'")
                             break
-                    # some schemas embed comparables under different keys
+                    
+                    # Extract comparables with enhanced handling
                     for ck in ("comparables", "comps", "sales", "data"):
-                        if isinstance(data.get(ck), list) and data.get(ck):
-                            avm_comparables = data[ck]
+                        avm_comps_data = data.get(ck)  # Renamed to avoid variable conflict
+                        if isinstance(avm_comps_data, list) and avm_comps_data:
+                            avm_comparables = avm_comps_data
+                            logger.info(f"[AVM] Found {len(avm_comparables)} comparables from field '{ck}'")
                             break
-            except Exception:
-                logger.exception("AVM request failed for %s", s.address)
+                    
+                    # Log subject property info if returned (for debugging)
+                    if "subjectProperty" in data:
+                        subject_info = data["subjectProperty"]
+                        logger.info(f"[AVM] Subject property info: beds={subject_info.get('bedrooms')}, baths={subject_info.get('bathrooms')}, sqft={subject_info.get('squareFootage')}")
+                        
+                else:
+                    logger.warning(f"[AVM] Non-200 response: {resp.status_code}")
+                    logger.warning(f"[AVM] Response text: {resp.text[:500]}")
+                    
+            except Exception as e:
+                logger.exception(f"[AVM] Request failed for {s.address}: {e}")
 
     # Compute estimate from comps (simplified here)
     comps_list: List[Property] = []
@@ -392,24 +473,43 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
                         continue
             return None
         for comp in avm_comparables:
+            # Enhanced comparable data extraction
+            comp_id = str(comp.get("id") or comp.get("propertyId") or comp.get("mlsId") or uuid4())
+            comp_address = str(comp.get("address") or comp.get("formattedAddress") or "Unknown Address")
+            comp_lat = float(_gf(comp, "lat", "latitude") or 0.0)
+            comp_lng = float(_gf(comp, "lng", "longitude") or 0.0)  # Fixed: was incorrectly parsing from 'lapshot_sqft'
+            comp_property_type = str(comp.get("propertyType") or "Single Family")
+            comp_sqft = float(_gi(comp, "livingArea", "squareFootage", "sqft") or 0)
+            comp_lot_sqft = float(_gi(comp, "lotSize", "lot_sqft") or 0) or None
+            comp_beds = int(_gi(comp, "beds", "bedrooms") or 0)
+            comp_baths = float(_gf(comp, "baths", "bathrooms") or 0)
+            comp_year_built = int(_gi(comp, "yearBuilt", "year_built") or 0)
+            comp_price = _gp(comp)
+            
+            price_formatted = f"${comp_price:,.0f}" if comp_price else "$0"
+            sqft_formatted = f"{comp_sqft:,.0f}" if comp_sqft else "0"
+            logger.info(f"[AVM Comp] {comp_address}: {price_formatted}, {comp_beds}bd/{comp_baths}ba, {sqft_formatted}sf")
+            
             comps_list.append(
                 Property(
-                    id=str(comp.get("id") or comp.get("propertyId") or comp.get("mlsId") or uuid4()),
-                    address=str(comp.get("address") or comp.get("formattedAddress") or "Unknown Address"),
-                    lat=float(_gf(comp, "lat", "latitude") or 0.0),
-                    lng=float(_gf(comp, "lapshot_sqft") or 0.0),
-                    property_type=str(comp.get("propertyType") or "SFR"),
-                    living_sqft=float(_gi(comp, "livingArea", "squareFootage", "sqft") or 0),
-                    lot_sqft=float(_gi(comp, "lotSize", "lot_sqft") or 0) or None,
-                    beds=int(_gi(comp, "beds", "bedrooms") or 0),
-                    baths=float(_gf(comp, "baths", "bathrooms") or 0),
-                    year_built=int(_gi(comp, "yearBuilt") or 0),
+                    id=comp_id,
+                    address=comp_address,
+                    lat=comp_lat,
+                    lng=comp_lng,
+                    property_type=comp_property_type,
+                    living_sqft=comp_sqft,
+                    lot_sqft=comp_lot_sqft,
+                    beds=comp_beds,
+                    baths=comp_baths,
+                    year_built=comp_year_built,
                     condition_rating=None,
                     features=set(),
                     sale_date=None,
-                    raw_price=_gp(comp),
+                    raw_price=comp_price,
                 )
             )
+            
+        logger.info(f"[AVM] Successfully processed {len(comps_list)} comparables")
 
     # Fallback to sample data if no RentCast comps
     if not comps_list:
@@ -440,9 +540,17 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
         if comp.raw_price:
             total_price += comp.raw_price * max(score, 0.01)
             total_weight += max(score, 0.01)
-    estimate = round(total_price / total_weight, 0) if total_weight > 0 else 0.0
+    fallback_estimate = round(total_price / total_weight, 0) if total_weight > 0 else 0.0
+    
+    # Use AVM estimate if available and valid, otherwise use fallback
     if avm_estimate is not None and avm_estimate > 0:
         estimate = float(avm_estimate)
+        logger.info(f"[CMA Baseline] Using RentCast AVM estimate: ${estimate:,.0f}")
+    else:
+        estimate = fallback_estimate
+        logger.info(f"[CMA Baseline] Using fallback estimate (no AVM): ${estimate:,.0f}")
+        
+    logger.info(f"[CMA Baseline] Final estimate: ${estimate:,.0f}, based on {len(scored)} comparables")
 
     run_id = str(uuid4())
     _save_cma_run(run_id, subject_prop, scored, estimate)
@@ -760,25 +868,46 @@ async def test_cors() -> Dict[str, str]:
     return {"message": "CORS is working!", "status": "success"}
 
 
-# ---------------- Rent estimate endpoint ----------------
+# ---------------- Enhanced Rent estimate endpoint ----------------
 @app.get("/rent/estimate")
-async def rent_estimate(address: str) -> Dict[str, Any]:
-    """Fetch estimated monthly rent for an address from RentCast."""
+async def rent_estimate(address: str, bedrooms: Optional[int] = None, bathrooms: Optional[float] = None, 
+                       squareFootage: Optional[int] = None, propertyType: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch estimated monthly rent for an address from RentCast with enhanced accuracy parameters."""
     api_key = os.getenv("RENTCAST_API_KEY")
     if not api_key:
         return {"monthly_rent": None, "error": "RENTCAST_API_KEY not set"}
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        logger.info(f"[Rent Estimate] Making enhanced rent request for: {address}")
+        
+        # Build enhanced parameters using configuration class
+        rent_params = RentCastConfig.get_avm_params(
+            address=address,
+            property_type=propertyType,
+            bedrooms=bedrooms,
+            bathrooms=bathrooms,
+            square_footage=squareFootage
+        )
+            
+        logger.info(f"[Rent Estimate] Request parameters: {rent_params}")
+        
+        async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 "https://api.rentcast.io/v1/avm/rent/long-term",
-                params={"address": address},
+                params=rent_params,
                 headers={"X-Api-Key": api_key},
             )
+            
+        logger.info(f"[Rent Estimate] Response status: {resp.status_code}")
+        
         if resp.status_code != 200:
+            logger.warning(f"[Rent Estimate] Non-200 response: {resp.status_code}")
+            logger.warning(f"[Rent Estimate] Response text: {resp.text[:500]}")
             return {"monthly_rent": None, "error": f"status {resp.status_code}", "details": resp.text[:200]}
 
         data = resp.json()
+        logger.info(f"[Rent Estimate] Raw response keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+        
         # Response may be an object or a list
         candidate = None
         if isinstance(data, list) and data:
@@ -788,24 +917,68 @@ async def rent_estimate(address: str) -> Dict[str, Any]:
         else:
             return {"monthly_rent": None}
 
-        # Try multiple keys for rent
-        for k in [
-            "rent", "monthlyRent", "rentEstimate", "estimatedRent", "amount", "value"
-        ]:
+        # Enhanced rent value extraction - RentCast uses 'rent' as primary field
+        rent_keys = [
+            "rent", "monthlyRent", "rentEstimate", "estimatedRent", "amount", "value", "price"
+        ]
+        
+        for k in rent_keys:
             v = candidate.get(k)
-            if v is not None:
+            if v is not None and v > 0:
                 try:
-                    return {"monthly_rent": float(v)}
+                    rent_value = float(v)
+                    logger.info(f"[Rent Estimate] Found rent: ${rent_value:,.0f}/month from field '{k}'")
+                    return {"monthly_rent": rent_value}
                 except Exception:
                     try:
-                        return {"monthly_rent": float(str(v).replace(",", ""))}
+                        rent_value = float(str(v).replace(",", ""))
+                        logger.info(f"[Rent Estimate] Found rent (parsed): ${rent_value:,.0f}/month from field '{k}'")
+                        return {"monthly_rent": rent_value}
                     except Exception:
                         continue
 
+        logger.warning(f"[Rent Estimate] No valid rent found in response")
         return {"monthly_rent": None}
+        
     except Exception as e:
-        logger.exception("Rent estimate exception: %s", e)
+        logger.exception(f"[Rent Estimate] Exception for {address}: {e}")
         return {"monthly_rent": None, "error": "exception"}
+
+# ---------------- Enhanced Debug endpoint for testing AVM improvements ----------------
+@app.get("/debug/avm")
+async def debug_avm(address: str, bedrooms: Optional[int] = None, bathrooms: Optional[float] = None, 
+                   squareFootage: Optional[int] = None, propertyType: Optional[str] = None) -> Dict[str, Any]:
+    """Debug endpoint to test enhanced AVM accuracy with detailed logging."""
+    api_key = os.getenv("RENTCAST_API_KEY")
+    if not api_key:
+        return {"error": "RENTCAST_API_KEY not set"}
+    
+    try:
+        # Build enhanced parameters using configuration class
+        avm_params = RentCastConfig.get_avm_params(
+            address=address,
+            property_type=propertyType,
+            bedrooms=bedrooms,
+            bathrooms=bathrooms,
+            square_footage=squareFootage
+        )
+        
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://api.rentcast.io/v1/avm/value",
+                params=avm_params,
+                headers={"X-Api-Key": api_key},
+            )
+        
+        return {
+            "address": address,
+            "request_params": avm_params,
+            "status_code": resp.status_code,
+            "response": resp.json() if resp.status_code == 200 else resp.text[:1000]
+        }
+        
+    except Exception as e:
+        return {"address": address, "error": str(e)}
 
 # ---------------- PDF Generation ----------------
 @app.get("/pdfx")

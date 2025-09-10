@@ -514,20 +514,20 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
     # Fallback to sample data if no RentCast comps
     if not comps_list:
         comps_list = [
-            Property(
+                Property(
                 id=str(comp["id"]),
                 address=comp["address"],
-                lat=0.0,
-                lng=0.0,
-                property_type="SFR",
+                    lat=0.0,
+                    lng=0.0,
+                    property_type="SFR",
                 living_sqft=comp["sqft"],
                 lot_sqft=comp["lot_size"],
                 beds=comp["beds"],
                 baths=comp["baths"],
                 year_built=comp["year_built"],
-                condition_rating=None,
-                features=set(),
-                sale_date=None,
+                    condition_rating=None,
+                    features=set(),
+                    sale_date=None,
                 raw_price=comp["price"],
             )
             for comp in comps_data

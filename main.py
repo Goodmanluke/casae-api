@@ -856,12 +856,6 @@ async def cma_adjust(
         )
 
 
-# ---------------- Debug endpoint ----------------
-@app.get("/debug/rentcast")
-async def debug_rentcast(address: str) -> Dict[str, Any]:
-    details = await fetch_property_details(address)
-    return {"address": address, "details": details}
-
 # ---------------- Test CORS endpoint ----------------
 @app.get("/test")
 async def test_cors() -> Dict[str, str]:
@@ -943,42 +937,6 @@ async def rent_estimate(address: str, bedrooms: Optional[int] = None, bathrooms:
     except Exception as e:
         logger.exception(f"[Rent Estimate] Exception for {address}: {e}")
         return {"monthly_rent": None, "error": "exception"}
-
-# ---------------- Enhanced Debug endpoint for testing AVM improvements ----------------
-@app.get("/debug/avm")
-async def debug_avm(address: str, bedrooms: Optional[int] = None, bathrooms: Optional[float] = None, 
-                   squareFootage: Optional[int] = None, propertyType: Optional[str] = None) -> Dict[str, Any]:
-    """Debug endpoint to test enhanced AVM accuracy with detailed logging."""
-    api_key = os.getenv("RENTCAST_API_KEY")
-    if not api_key:
-        return {"error": "RENTCAST_API_KEY not set"}
-    
-    try:
-        # Build enhanced parameters using configuration class
-        avm_params = RentCastConfig.get_avm_params(
-            address=address,
-            property_type=propertyType,
-            bedrooms=bedrooms,
-            bathrooms=bathrooms,
-            square_footage=squareFootage
-        )
-        
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                "https://api.rentcast.io/v1/avm/value",
-                params=avm_params,
-                headers={"X-Api-Key": api_key},
-            )
-        
-        return {
-            "address": address,
-            "request_params": avm_params,
-            "status_code": resp.status_code,
-            "response": resp.json() if resp.status_code == 200 else resp.text[:1000]
-        }
-        
-    except Exception as e:
-        return {"address": address, "error": str(e)}
 
 # ---------------- PDF Generation ----------------
 @app.get("/pdfx")

@@ -616,7 +616,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
         )
 
 
-# ---------------- CMA Adjust ----------------
+
 @app.get("/cma/adjust", response_model=CMAResponse)
 async def cma_adjust(
     cma_run_id: str,
@@ -626,8 +626,9 @@ async def cma_adjust(
     add_baths: float = 0.0,
     add_sqft: int = 0
 ) -> CMAResponse:
-    """Apply adjustments to an existing CMA run and return adjusted estimate."""
+    """Apply adjustments to an existing CMA run by re-running the CMA with adjusted parameters."""
     logger.info(f"[CMA Adjust] Processing adjustments for run: {cma_run_id}")
+    logger.info(f"[CMA Adjust] Adjustments: condition={condition}, add_beds={add_beds}, add_baths={add_baths}, add_sqft={add_sqft}")
     
     # Get the original CMA run
     original_run = _load_cma_run(cma_run_id)
@@ -635,226 +636,288 @@ async def cma_adjust(
         raise HTTPException(status_code=404, detail="CMA run not found")
     
     subject_prop = original_run["subject"]
-    original_comps = original_run["comps"]
     original_estimate = original_run["estimate"]
     
-    logger.info(f"[CMA Adjust] Retrieved run: subject={subject_prop.address}, comps_count={len(original_comps)}, estimate={original_estimate}")
-    logger.info(f"[CMA Adjust] Comps type: {type(original_comps)}, first comp: {original_comps[0] if original_comps else 'None'}")
+    logger.info(f"[CMA Adjust] Original run: subject={subject_prop.address}, estimate={original_estimate}")
     
-    # Create adjustments dict for AI processing
-    adjustments = {
+    # Create adjusted subject property with modified parameters
+    adjusted_beds = (subject_prop.beds or 0) + add_beds
+    adjusted_baths = float((subject_prop.baths or 0) + add_baths)
+    adjusted_sqft = int((subject_prop.living_sqft or 0) + add_sqft)
+    
+    logger.info(f"[CMA Adjust] Adjusted parameters: beds={adjusted_beds}, baths={adjusted_baths}, sqft={adjusted_sqft}")
+    
+    # Create an adjusted Subject for the new CMA search
+    adjusted_subject_input = Subject(
+        address=subject_prop.address,
+        lat=subject_prop.lat,
+        lng=subject_prop.lng,
+        property_type=subject_prop.property_type,
+        sqft=adjusted_sqft,
+        lot_sqft=int(subject_prop.lot_sqft or 0) if subject_prop.lot_sqft else None,
+        beds=adjusted_beds,
+        baths=adjusted_baths,
+        year_built=subject_prop.year_built,
+        condition=condition or subject_prop.condition_rating
+    )
+    
+    # Re-run the CMA baseline logic with adjusted parameters
+    logger.info(f"[CMA Adjust] Re-running CMA with adjusted parameters...")
+    
+    # Create adjusted property object for comp matching
+    adjusted_prop = Property(
+        id=str(uuid4()),
+        address=subject_prop.address,
+        lat=subject_prop.lat or 0.0,
+        lng=subject_prop.lng or 0.0,
+        property_type=subject_prop.property_type,
+        living_sqft=float(adjusted_sqft),
+        lot_sqft=subject_prop.lot_sqft,
+        beds=adjusted_beds,
+        baths=adjusted_baths,
+        year_built=subject_prop.year_built,
+        condition_rating=condition or subject_prop.condition_rating,
+        features=set(),
+        sale_date=None,
+        raw_price=None,
+    )
+    
+    # Re-run RentCast AVM with adjusted parameters
+    use_avm = os.getenv("RENTCAST_USE_AVM") == "1"
+    avm_estimate: Optional[float] = None
+    avm_comparables: Optional[list] = None
+    
+    if use_avm:
+        api_key = os.getenv("RENTCAST_API_KEY")
+        if api_key:
+            try:
+                logger.info(f"[CMA Adjust] Making AVM request with adjusted parameters for: {subject_prop.address}")
+                
+                # Build enhanced parameters with adjusted values
+                avm_params = RentCastConfig.get_avm_params(
+                    address=subject_prop.address,
+                    property_type=subject_prop.property_type,
+                    bedrooms=adjusted_beds,
+                    bathrooms=adjusted_baths,
+                    square_footage=adjusted_sqft
+                )
+                
+                logger.info(f"[CMA Adjust] AVM request parameters: {avm_params}")
+                
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.get(
+                        "https://api.rentcast.io/v1/avm/value",
+                        params=avm_params,
+                        headers={"X-Api-Key": api_key},
+                    )
+                    
+                logger.info(f"[CMA Adjust] AVM response status: {resp.status_code}")
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    logger.info(f"[CMA Adjust] AVM response keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+                    
+                    # Extract price estimate
+                    price_key_candidates = ["price", "value", "estimate", "priceEstimate"]
+                    for k in price_key_candidates:
+                        v = data.get(k)
+                        if isinstance(v, (int, float)) and v > 0:
+                            avm_estimate = float(v)
+                            logger.info(f"[CMA Adjust] Found adjusted AVM estimate: ${avm_estimate:,.0f} from field '{k}'")
+                            break
+                    
+                    # Extract comparables
+                    for ck in ("comparables", "comps", "sales", "data"):
+                        avm_comps_data = data.get(ck)
+                        if isinstance(avm_comps_data, list) and avm_comps_data:
+                            avm_comparables = avm_comps_data
+                            logger.info(f"[CMA Adjust] Found {len(avm_comparables)} adjusted comparables from field '{ck}'")
+                            break
+                            
+                else:
+                    logger.warning(f"[CMA Adjust] AVM non-200 response: {resp.status_code}")
+                    
+            except Exception as e:
+                logger.exception(f"[CMA Adjust] AVM request failed for adjusted parameters: {e}")
+    
+    # Build comparables list from AVM or fallback data
+    comps_list: List[Property] = []
+    if avm_comparables:
+        def _gi(d: dict, *keys: str) -> Optional[int]:
+            for k in keys:
+                v = d.get(k)
+                if v is None:
+                    continue
+                try:
+                    return int(v)
+                except Exception:
+                    try:
+                        return int(float(v))
+                    except Exception:
+                        continue
+            return None
+        def _gf(d: dict, *keys: str) -> Optional[float]:
+            for k in keys:
+                v = d.get(k)
+                if v is None:
+                    continue
+                try:
+                    return float(v)
+                except Exception:
+                    continue
+            return None
+        def _gp(d: dict) -> Optional[float]:
+            """Robust price getter across possible schemas."""
+            price_keys = [
+                "raw_price", "price", "salePrice", "listPrice", "soldPrice", "sold_price",
+                "lastSalePrice", "last_sold_price", "amount", "amountValue", "value",
+                "estimate", "estimatedValue", "avm"
+            ]
+            for k in price_keys:
+                v = d.get(k)
+                if v is None:
+                    continue
+                try:
+                    return float(v)
+                except Exception:
+                    try:
+                        return float(str(v).replace(",", ""))
+                    except Exception:
+                        continue
+            return None
+        
+        for comp in avm_comparables:
+            comp_id = str(comp.get("id") or comp.get("propertyId") or comp.get("mlsId") or uuid4())
+            comp_address = str(comp.get("address") or comp.get("formattedAddress") or "Unknown Address")
+            comp_lat = float(_gf(comp, "lat", "latitude") or 0.0)
+            comp_lng = float(_gf(comp, "lng", "longitude") or 0.0)
+            comp_property_type = str(comp.get("propertyType") or "Single Family")
+            comp_sqft = float(_gi(comp, "livingArea", "squareFootage", "sqft") or 0)
+            comp_lot_sqft = float(_gi(comp, "lotSize", "lot_sqft") or 0) or None
+            comp_beds = int(_gi(comp, "beds", "bedrooms") or 0)
+            comp_baths = float(_gf(comp, "baths", "bathrooms") or 0)
+            comp_year_built = int(_gi(comp, "yearBuilt", "year_built") or 0)
+            comp_price = _gp(comp)
+            
+            price_formatted = f"${comp_price:,.0f}" if comp_price else "$0"
+            sqft_formatted = f"{comp_sqft:,.0f}" if comp_sqft else "0"
+            logger.info(f"[CMA Adjust] Adjusted comp: {comp_address}: {price_formatted}, {comp_beds}bd/{comp_baths}ba, {sqft_formatted}sf")
+            
+            comps_list.append(
+                Property(
+                    id=comp_id,
+                    address=comp_address,
+                    lat=comp_lat,
+                    lng=comp_lng,
+                    property_type=comp_property_type,
+                    living_sqft=comp_sqft,
+                    lot_sqft=comp_lot_sqft,
+                    beds=comp_beds,
+                    baths=comp_baths,
+                    year_built=comp_year_built,
+                    condition_rating=None,
+                    features=set(),
+                    sale_date=None,
+                    raw_price=comp_price,
+                )
+            )
+        
+        logger.info(f"[CMA Adjust] Successfully processed {len(comps_list)} adjusted comparables")
+    
+    # Fallback to original sample data if no AVM comps
+    if not comps_list:
+        logger.info(f"[CMA Adjust] No AVM comps found, using fallback sample data")
+        comps_list = [
+            Property(
+                id=str(comp["id"]),
+                address=comp["address"],
+                lat=0.0,
+                lng=0.0,
+                property_type="SFR",
+                living_sqft=comp["sqft"],
+                lot_sqft=comp["lot_size"],
+                beds=comp["beds"],
+                baths=comp["baths"],
+                year_built=comp["year_built"],
+                condition_rating=None,
+                features=set(),
+                sale_date=None,
+                raw_price=comp["price"],
+            )
+            for comp in comps_data
+        ]
+    
+    # Find best comps using scoring algorithm with adjusted property
+    _, scored = find_comps(adjusted_prop, comps_list, {}, default_weights, {}, 5)
+    total_price, total_weight = 0.0, 0.0
+    for comp, score in scored:
+        if comp.raw_price:
+            total_price += comp.raw_price * max(score, 0.01)
+            total_weight += max(score, 0.01)
+    fallback_estimate = round(total_price / total_weight, 0) if total_weight > 0 else 0.0
+    
+    # Use AVM estimate if available and valid, otherwise use fallback
+    if avm_estimate is not None and avm_estimate > 0:
+        adjusted_estimate = float(avm_estimate)
+        logger.info(f"[CMA Adjust] Using RentCast AVM adjusted estimate: ${adjusted_estimate:,.0f}")
+    else:
+        adjusted_estimate = fallback_estimate
+        logger.info(f"[CMA Adjust] Using fallback adjusted estimate: ${adjusted_estimate:,.0f}")
+    
+    logger.info(f"[CMA Adjust] Final adjusted estimate: ${adjusted_estimate:,.0f}, based on {len(scored)} adjusted comparables")
+    logger.info(f"[CMA Adjust] Estimate change: ${original_estimate:,.0f} → ${adjusted_estimate:,.0f} (${adjusted_estimate - original_estimate:+,.0f})")
+    
+    # Calculate distances and generate comps response
+    adjusted_comps_with_distance = []
+    for comp, score in scored:
+        try:
+            distance = None
+            if adjusted_prop.lat and adjusted_prop.lng and comp.lat and comp.lng:
+                distance = calculate_distance(adjusted_prop.lat, adjusted_prop.lng, comp.lat, comp.lng)
+            
+            adjusted_comps_with_distance.append(Comp(
+                id=str(comp.id),
+                address=getattr(comp, 'address', 'Unknown Address'),
+                raw_price=comp.raw_price,
+                living_sqft=comp.living_sqft,
+                beds=comp.beds,
+                baths=comp.baths,
+                year_built=comp.year_built,
+                lot_sqft=comp.lot_sqft,
+                distance_mi=distance,
+                similarity=score,
+                photo_url=get_property_photo_url(getattr(comp, 'address', 'Unknown Address'))
+            ))
+        except Exception as e:
+            logger.error(f"[CMA Adjust] Error processing adjusted comp {comp.id}: {e}")
+            continue
+    
+    # Generate narrative for adjusted property
+    adjusted_narrative = generate_ai_narrative(adjusted_prop, adjusted_estimate, scored, is_adjusted=True, adjustments={
         "condition": condition,
         "renovations": renovations or [],
         "add_beds": add_beds,
         "add_baths": add_baths,
         "add_sqft": add_sqft
-    }
+    })
     
-    # Use AI to compute adjusted value
+    # Persist adjusted data for later PDF generation
     try:
-        logger.info(f"[CMA Adjust] Attempting AI adjustment with: subject={subject_prop.address}, comps_count={len(original_comps)}, adjustments={adjustments}")
-        logger.info(f"[CMA Adjust] OpenAI API key present: {bool(os.getenv('OPENAI_API_KEY'))}")
-        
-        # Convert Property objects to dictionaries safely
-        subject_dict = {
-            'address': subject_prop.address,
-            'lat': subject_prop.lat,
-            'lng': subject_prop.lng,
-            'property_type': subject_prop.property_type,
-            'living_sqft': subject_prop.living_sqft,
-            'lot_sqft': subject_prop.lot_sqft,
-            'beds': subject_prop.beds,
-            'baths': subject_prop.baths,
-            'year_built': subject_prop.year_built,
-            'condition_rating': subject_prop.condition_rating,
-            'raw_price': subject_prop.raw_price
+        cma_runs_storage[cma_run_id]["adjusted"] = {
+            "estimate": adjusted_estimate,
+            "subject": adjusted_subject_input,
+            "comps": scored,
         }
-        
-        comps_dicts = []
-        for comp, _ in original_comps:
-            comp_dict = {
-                'id': comp.id,
-                'address': comp.address,
-                'lat': comp.lat,
-                'lng': comp.lng,
-                'property_type': comp.property_type,
-                'living_sqft': comp.living_sqft,
-                'lot_sqft': comp.lot_sqft,
-                'beds': comp.beds,
-                'baths': comp.baths,
-                'year_built': comp.year_built,
-                'condition_rating': comp.condition_rating,
-                'raw_price': comp.raw_price
-            }
-            comps_dicts.append(comp_dict)
-        
-        ai_result = await compute_adjusted_cma(
-            subject_dict,
-            comps_dicts,
-            adjustments
-        )
-        
-        logger.info(f"[CMA Adjust] AI result: {ai_result}")
-        
-        adjusted_estimate = ai_result.get("value")
-        logger.info(f"[CMA Adjust] AI returned value: {adjusted_estimate}")
-        
-        if adjusted_estimate is None or adjusted_estimate <= 0:
-            logger.warning(f"[CMA Adjust] AI returned invalid value: {adjusted_estimate}, using fallback calculation")
-            # Force fallback calculation by raising an exception
-            raise Exception("AI adjustment failed, using fallback")
-        else:
-            logger.info(f"[CMA Adjust] AI adjustment successful: original={original_estimate}, adjusted={adjusted_estimate}")
-            reasoning = ai_result.get("reasoning", "Adjustments applied using AI analysis")
-            
-            # Create adjusted subject property
-            adjusted_subject = Subject(
-                address=subject_prop.address,
-                lat=subject_prop.lat,
-                lng=subject_prop.lng,
-                property_type=subject_prop.property_type,
-                sqft=int((subject_prop.living_sqft or 0) + add_sqft),
-                lot_sqft=int(subject_prop.lot_sqft or 0) if subject_prop.lot_sqft else None,
-                beds=(subject_prop.beds or 0) + add_beds,
-                baths=float((subject_prop.baths or 0) + add_baths),
-                year_built=subject_prop.year_built,
-                condition=condition or subject_prop.condition_rating
-            )
-            
-            # Generate new narrative for adjusted property
-            adjusted_narrative = generate_ai_narrative(adjusted_subject, adjusted_estimate, original_comps)
-            
-            # Convert stored tuples back to Comp objects for the response
-            comps_for_response = []
-            for comp, score in original_comps:
-                try:
-                    distance = None
-                    if subject_prop.lat and subject_prop.lng and comp.lat and comp.lng:
-                        distance = calculate_distance(subject_prop.lat, subject_prop.lng, comp.lat, comp.lng)
-                    
-                    comps_for_response.append(Comp(
-                        id=str(comp.id),
-                        address=getattr(comp, 'address', 'Unknown Address'),
-                        raw_price=comp.raw_price,
-                        living_sqft=comp.living_sqft,
-                        beds=comp.beds,
-                        baths=comp.baths,
-                        year_built=comp.year_built,
-                        lot_sqft=comp.lot_sqft,
-                        distance_mi=distance,
-                        similarity=score,
-                        photo_url=get_property_photo_url(getattr(comp, 'address', 'Unknown Address'))
-                    ))
-                except Exception as e:
-                    logger.error(f"[CMA Adjust] Error processing comp {comp.id}: {e}")
-                    continue
-            
-                    # Persist adjusted data for later PDF generation
-        try:
-            cma_runs_storage[cma_run_id]["adjusted"] = {
-                "estimate": adjusted_estimate,
-                "subject": adjusted_subject,
-                "comps": original_comps,
-            }
-        except Exception:
-            pass
-
-        return CMAResponse(
-            estimate=adjusted_estimate,
-            subject=adjusted_subject,
-            comps=comps_for_response,
-            explanation=adjusted_narrative,
-            cma_run_id=cma_run_id,  # Keep same run ID to link with original
-        )
-        
-    except Exception as e:
-        logger.error(f"[CMA Adjust] AI adjustment failed: {e}")
-        # Fallback: simple percentage adjustments
-        adjustment_multiplier = 1.0
-        
-        # Condition adjustments (multiplicative)
-        if condition == "Poor":
-            adjustment_multiplier *= 0.85
-        elif condition == "Fair":
-            adjustment_multiplier *= 0.92
-        elif condition == "Excellent":
-            adjustment_multiplier *= 1.15
-            
-        # Renovation adjustments (multiplicative)
-        renovation_bonus = 1.0 + (len(renovations or []) * 0.05)
-        adjustment_multiplier *= renovation_bonus
-        
-        # Size adjustments (multiplicative)
-        if add_beds > 0:
-            adjustment_multiplier *= (1.0 + add_beds * 0.08)
-        if add_baths > 0:
-            adjustment_multiplier *= (1.0 + add_baths * 0.06)
-        if add_sqft > 0:
-            adjustment_multiplier *= (1.0 + (add_sqft / 1000) * 0.1)
-            
-        adjusted_estimate = round(original_estimate * adjustment_multiplier, 0)
-        
-        logger.info(f"[CMA Adjust] Fallback calculation: original={original_estimate}, multiplier={adjustment_multiplier}, adjusted={adjusted_estimate}")
-        logger.info(f"[CMA Adjust] Adjustment breakdown: condition={condition}, renovations={renovations}, add_beds={add_beds}, add_baths={add_baths}, add_sqft={add_sqft}")
-        logger.info(f"[CMA Adjust] Using fallback calculation - AI failed")
-        
-        # Create adjusted subject property
-        adjusted_subject = Subject(
-            address=subject_prop.address,
-            lat=subject_prop.lat,
-            lng=subject_prop.lng,
-            property_type=subject_prop.property_type,
-            sqft=int((subject_prop.living_sqft or 0) + add_sqft),
-            lot_sqft=int(subject_prop.lot_sqft or 0) if subject_prop.lot_sqft else None,
-            beds=(subject_prop.beds or 0) + add_beds,
-            baths=float((subject_prop.baths or 0) + add_baths),
-            year_built=subject_prop.year_built,
-            condition=condition or subject_prop.condition_rating
-        )
-        
-        # Convert stored tuples back to Comp objects for the response
-        comps_for_response = []
-        for comp, score in original_comps:
-            try:
-                distance = None
-                if subject_prop.lat and subject_prop.lng and comp.lat and comp.lng:
-                    distance = calculate_distance(subject_prop.lat, subject_prop.lng, comp.lat, comp.lng)
-                
-                comps_for_response.append(Comp(
-                    id=str(comp.id),
-                    address=getattr(comp, 'address', 'Unknown Address'),
-                    raw_price=comp.raw_price,
-                    living_sqft=comp.living_sqft,
-                    beds=comp.beds,
-                    baths=comp.baths,
-                    year_built=comp.year_built,
-                    lot_sqft=comp.lot_sqft,
-                    distance_mi=distance,
-                    similarity=score,
-                    photo_url=get_property_photo_url(getattr(comp, 'address', 'Unknown Address'))
-                ))
-            except Exception as e:
-                logger.error(f"[CMA Adjust] Error processing comp {comp.id}: {e}")
-                continue
-        
-        # Persist adjusted data for later PDF generation (fallback path)
-        try:
-            cma_runs_storage[cma_run_id]["adjusted"] = {
-                "estimate": adjusted_estimate,
-                "subject": adjusted_subject,
-                "comps": original_comps,
-            }
-        except Exception:
-            pass
-
-        return CMAResponse(
-            estimate=adjusted_estimate,
-            subject=adjusted_subject,
-            comps=comps_for_response,
-            explanation=f"Applied adjustments using fallback calculation. New estimate: ${adjusted_estimate:,}",
-            cma_run_id=cma_run_id,
-        )
-
+    except Exception:
+        pass
+    
+    return CMAResponse(
+        estimate=adjusted_estimate,
+        subject=adjusted_subject_input,
+        comps=adjusted_comps_with_distance,
+        explanation=adjusted_narrative,
+        cma_run_id=cma_run_id,
+    )
 
 # ---------------- Test CORS endpoint ----------------
 @app.get("/test")

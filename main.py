@@ -942,16 +942,24 @@ async def rent_estimate(address: str, bedrooms: Optional[int] = None, bathrooms:
         return {"monthly_rent": None, "error": "RENTCAST_API_KEY not set"}
 
     try:
-        logger.info(f"[Rent Estimate] Making enhanced rent request for: {address}")
+        logger.info(f"[Rent Estimate] Input parameters - bedrooms: {bedrooms}, bathrooms: {bathrooms}, squareFootage: {squareFootage}, propertyType: {propertyType}")
         
-        # Build enhanced parameters using configuration class
-        rent_params = RentCastConfig.get_avm_params(
-            address=address,
-            property_type=propertyType,
-            bedrooms=bedrooms,
-            bathrooms=bathrooms,
-            square_footage=squareFootage
-        )
+        rent_params = {
+            "address": address,
+            "lookupSubjectAttributes": "true", 
+            "compCount": RentCastConfig.DEFAULT_COMP_COUNT,
+            "maxRadius": RentCastConfig.DEFAULT_MAX_RADIUS,
+            "daysOld": RentCastConfig.DEFAULT_DAYS_OLD,
+        }
+        
+        if propertyType:
+            rent_params["propertyType"] = RentCastConfig.PROPERTY_TYPE_MAP.get(propertyType, propertyType)
+        if bedrooms and bedrooms > 0:
+            rent_params["bedrooms"] = bedrooms
+        if bathrooms and bathrooms > 0:
+            rent_params["bathrooms"] = bathrooms
+        if squareFootage and squareFootage > 0:
+            rent_params["squareFootage"] = squareFootage
             
         logger.info(f"[Rent Estimate] Request parameters: {rent_params}")
         

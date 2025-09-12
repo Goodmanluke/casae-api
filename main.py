@@ -393,6 +393,7 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
                     )
                     
                 logger.info(f"[AVM] Response status: {resp.status_code}")
+                logger.info(f"[AVM] Response *************: {resp.json()}")
                 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -533,24 +534,26 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
             for comp in comps_data
         ]
 
-    # Find best comps using scoring algorithm
-    _, scored = find_comps(subject_prop, comps_list, {}, default_weights, {}, 5)
-    total_price, total_weight = 0.0, 0.0
-    for comp, score in scored:
-        if comp.raw_price:
-            total_price += comp.raw_price * max(score, 0.01)
-            total_weight += max(score, 0.01)
-    fallback_estimate = round(total_price / total_weight, 0) if total_weight > 0 else 0.0
-    
-    # Use AVM estimate if available and valid, otherwise use fallback
-    if avm_estimate is not None and avm_estimate > 0:
+    if avm_estimate is not None and avm_estimate > 0 and len(comps_list) >= 5:
         estimate = float(avm_estimate)
-        logger.info(f"[CMA Baseline] Using RentCast AVM estimate: ${estimate:,.0f}")
+        scored = []
+        for comp in comps_list[:5]:
+            original_comp = None
+            for avm_comp in avm_comparables:
+                if avm_comp.get('id') == comp.id:
+                    original_comp = avm_comp
+                    break
+            correlation_score = original_comp.get('correlation', 0.95) if original_comp else 0.95
+            scored.append((comp, correlation_score))
     else:
-        estimate = fallback_estimate
-        logger.info(f"[CMA Baseline] Using fallback estimate (no AVM): ${estimate:,.0f}")
-        
-    logger.info(f"[CMA Baseline] Final estimate: ${estimate:,.0f}, based on {len(scored)} comparables")
+        _, scored = find_comps(subject_prop, comps_list, {}, default_weights, {}, 5)
+        total_price, total_weight = 0.0, 0.0
+        for comp, score in scored:
+            if comp.raw_price:
+                total_price += comp.raw_price * max(score, 0.01)
+                total_weight += max(score, 0.01)
+        estimate = round(total_price / total_weight, 0) if total_weight > 0 else 0.0
+        logger.info(f"[CMA Baseline] Using fallback estimate: ${estimate:,.0f}")
 
     run_id = str(uuid4())
     _save_cma_run(run_id, subject_prop, scored, estimate)
@@ -847,23 +850,27 @@ async def cma_adjust(
             for comp in comps_data
         ]
     
-    # Find best comps using scoring algorithm with adjusted property
-    _, scored = find_comps(adjusted_prop, comps_list, {}, default_weights, {}, 5)
-    total_price, total_weight = 0.0, 0.0
-    for comp, score in scored:
-        if comp.raw_price:
-            total_price += comp.raw_price * max(score, 0.01)
-            total_weight += max(score, 0.01)
-    fallback_estimate = round(total_price / total_weight, 0) if total_weight > 0 else 0.0
-    
-    # Use AVM estimate if available and valid, otherwise use fallback
-    if avm_estimate is not None and avm_estimate > 0:
+    if avm_estimate is not None and avm_estimate > 0 and len(comps_list) >= 5:
         adjusted_estimate = float(avm_estimate)
         logger.info(f"[CMA Adjust] Using RentCast AVM adjusted estimate: ${adjusted_estimate:,.0f}")
+        scored = []
+        for comp in comps_list[:5]:
+            original_comp = None
+            for avm_comp in avm_comparables:
+                if avm_comp.get('id') == comp.id:
+                    original_comp = avm_comp
+                    break
+            correlation_score = original_comp.get('correlation', 0.95) if original_comp else 0.95
+            scored.append((comp, correlation_score))
     else:
-        adjusted_estimate = fallback_estimate
+        _, scored = find_comps(adjusted_prop, comps_list, {}, default_weights, {}, 5)
+        total_price, total_weight = 0.0, 0.0
+        for comp, score in scored:
+            if comp.raw_price:
+                total_price += comp.raw_price * max(score, 0.01)
+                total_weight += max(score, 0.01)
+        adjusted_estimate = round(total_price / total_weight, 0) if total_weight > 0 else 0.0
         logger.info(f"[CMA Adjust] Using fallback adjusted estimate: ${adjusted_estimate:,.0f}")
-    
     logger.info(f"[CMA Adjust] Final adjusted estimate: ${adjusted_estimate:,.0f}, based on {len(scored)} adjusted comparables")
     logger.info(f"[CMA Adjust] Estimate change: ${original_estimate:,.0f} → ${adjusted_estimate:,.0f} (${adjusted_estimate - original_estimate:+,.0f})")
     

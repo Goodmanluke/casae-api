@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Tuple, Any
 import os
@@ -6,8 +6,6 @@ import json
 import time
 import logging
 import httpx
-from pydantic import BaseModel
-from datetime import datetime, date
 from uuid import uuid4
 import math
 
@@ -25,11 +23,11 @@ except Exception:
     Client = None
 
 # API schemas (from your repo)
-from cma_models import Subject, CMAInput, AdjustmentInput, Comp, CMAResponse
+from cma_models import Subject, CMAInput, Comp, CMAResponse
 
 # PDF/AI services (from your repo)
 from pdf_utils import create_cma_pdf
-from services.ai import rank_comparables, compute_adjusted_cma, generate_cma_summary, adjust_comp_prices_for_condition_and_renovations
+from services.ai import adjust_comp_prices_for_condition_and_renovations
 
 app = FastAPI(title="Casae API", version="0.2.3")
 
@@ -624,14 +622,17 @@ async def cma_baseline(payload: CMAInput) -> CMAResponse:
 async def cma_adjust(
     cma_run_id: str,
     condition: Optional[str] = None,
-    renovations: Optional[List[str]] = None,
+    renovations: Optional[List[str]] = Query(default=None, description="List of renovations (can be sent multiple times)"),
     add_beds: int = 0,
     add_baths: float = 0.0,
     add_sqft: int = 0
 ) -> CMAResponse:
     """Apply adjustments to an existing CMA run with OpenAI-powered condition and renovation adjustments."""
     logger.info(f"[CMA Adjust] Processing adjustments for run: {cma_run_id}")
-    logger.info(f"[CMA Adjust] Adjustments: condition={condition}, renovations={renovations}, add_beds={add_beds}, add_baths={add_baths}, add_sqft={add_sqft}")
+    logger.info(f"[CMA Adjust] RAW PARAMS - condition: '{condition}', renovations: {renovations}")
+    logger.info(f"[CMA Adjust] Renovations type: {type(renovations)}, is None: {renovations is None}, length: {len(renovations) if renovations else 'N/A'}")
+    if renovations:
+        logger.info(f"[CMA Adjust] Individual renovations: {[f'{i}:{item}' for i, item in enumerate(renovations)]}")
     
     # Get the original CMA run
     original_run = _load_cma_run(cma_run_id)
@@ -654,12 +655,17 @@ async def cma_adjust(
     
     # Use provided values or defaults
     final_condition = condition or DEFAULT_CONDITION
-    final_renovations = renovations or DEFAULT_RENOVATIONS
     
-    logger.info(f"[CMA Adjust] Adjusted parameters: beds={adjusted_beds}, baths={adjusted_baths}, sqft={adjusted_sqft}")
-    logger.info(f"[CMA Adjust] Condition: {final_condition}, Renovations: {final_renovations}")
+    if renovations is None:
+        final_renovations = DEFAULT_RENOVATIONS
+    elif isinstance(renovations, list):
+        final_renovations = renovations
+    elif isinstance(renovations, str):
+        final_renovations = [r.strip() for r in renovations.split(',') if r.strip()]
+    else:
+        logger.warning(f"[CMA Adjust] Unknown renovations type: {type(renovations)}, using defaults")
+        final_renovations = DEFAULT_RENOVATIONS
     
-    # Create an adjusted Subject for the new CMA search
     adjusted_subject_input = Subject(
         address=subject_prop.address,
         lat=subject_prop.lat,
@@ -673,10 +679,7 @@ async def cma_adjust(
         condition=final_condition
     )
     
-    # Re-run the CMA baseline logic with adjusted parameters
     logger.info(f"[CMA Adjust] Re-running CMA with adjusted parameters...")
-    
-    # Create adjusted property object for comp matching
     adjusted_prop = Property(
         id=str(uuid4()),
         address=subject_prop.address,
@@ -694,8 +697,6 @@ async def cma_adjust(
         raw_price=None,
     )
     
-    # Step 1: Re-run RentCast AVM with adjusted parameters (beds, baths, sqft)
-    # Note: RentCast doesn't support condition/renovations, so we'll get baseline data
     use_avm = os.getenv("RENTCAST_USE_AVM") == "1"
     avm_estimate: Optional[float] = None
     avm_comparables: Optional[list] = None
@@ -706,7 +707,6 @@ async def cma_adjust(
             try:
                 logger.info(f"[CMA Adjust] Making AVM request with adjusted parameters for: {subject_prop.address}")
                 
-                # Build enhanced parameters with adjusted values
                 avm_params = RentCastConfig.get_avm_params(
                     address=subject_prop.address,
                     property_type=subject_prop.property_type,
@@ -739,7 +739,6 @@ async def cma_adjust(
                             logger.info(f"[CMA Adjust] Found adjusted AVM estimate: ${avm_estimate:,.0f} from field '{k}'")
                             break
                     
-                    # Extract comparables
                     for ck in ("comparables", "comps", "sales", "data"):
                         avm_comps_data = data.get(ck)
                         if isinstance(avm_comps_data, list) and avm_comps_data:
@@ -753,7 +752,6 @@ async def cma_adjust(
             except Exception as e:
                 logger.exception(f"[CMA Adjust] AVM request failed for adjusted parameters: {e}")
     
-    # Step 2: Build comparables list from AVM or fallback data
     comps_list: List[Property] = []
     raw_comps_for_ai: List[Dict[str, Any]] = []
     

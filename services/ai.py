@@ -91,52 +91,43 @@ async def adjust_comp_prices_for_condition_and_renovations(
         # No adjustments needed, return original comps
         return comps
     
-    # Prepare the prompt for OpenAI
+    missing_renovations = set(default_renovations) - set(subject_renovations)
+    extra_renovations = set(subject_renovations) - set(default_renovations)
+    
     prompt = f"""
-    You are a professional real estate appraiser. I need you to adjust comparable property prices based on condition and renovation differences.
+    REAL ESTATE APPRAISAL TASK: Adjust comparable sale prices for a subject property.
     
-    SUBJECT PROPERTY DETAILS:
-    - Condition: {subject_condition}
-    - Renovations: {', '.join(subject_renovations) if subject_renovations else 'None'}
+    BASELINE: Comparable sales assume {default_condition} condition with renovations: {', '.join(default_renovations)}
+    SUBJECT: Actually has {subject_condition} condition with renovations: {', '.join(subject_renovations) if subject_renovations else 'none'}
     
-    BASELINE (DEFAULT) ASSUMPTIONS:
-    - Default Condition: {default_condition}
-    - Default Renovations: {', '.join(default_renovations)}
-    
-    COMPARABLE PROPERTIES TO ADJUST:
+    COMPARABLES:
     {json.dumps(comps, indent=2)}
     
-    TASK:
-    Adjust the raw_price of each comparable property to reflect what it would sell for if it had the same condition and renovations as the subject property.
+    ADJUSTMENT RULES:
+    - Subject BETTER than baseline = INCREASE comparable prices
+    - Subject WORSE than baseline = DECREASE comparable prices
     
-    CONDITION ADJUSTMENT GUIDELINES:
-    - Poor condition: Typically 10-20% below market value
-    - Fair condition: Typically 5-10% below market value  
-    - Good condition: Market value baseline
-    - Excellent condition: Typically 5-15% above market value
+    SPECIFIC ADJUSTMENTS:
+    1. Condition: {subject_condition} vs {default_condition}
+       - Excellent > Good: ADD 10% 
+       - Good = Good: No change
+       - Fair < Good: SUBTRACT 7%
+       - Poor < Good: SUBTRACT 15%
     
-    RENOVATION ADJUSTMENT GUIDELINES:
-    - Kitchen renovation: +/- $15,000-$30,000 depending on scope
-    - Bathroom renovation: +/- $8,000-$15,000 per bathroom
-    - Flooring renovation: +/- $5,000-$15,000 depending on materials
-    - Roof renovation: +/- $10,000-$25,000 depending on size
-    - Windows renovation: +/- $8,000-$20,000 depending on quantity
+    2. Missing renovations: {list(missing_renovations) if missing_renovations else 'none'}
+       - Each missing renovation: SUBTRACT $15,000-30,000 depending on home value
     
-    Consider the size and value of each property when applying adjustments. Higher-value homes should receive proportionally higher adjustment amounts.
-    
-    RESPOND IN JSON FORMAT:
+    JSON Response:
     {{
         "adjusted_comps": [
             {{
                 "id": "comp_id",
-                "address": "comp_address", 
-                "original_price": original_raw_price,
-                "adjusted_price": adjusted_raw_price,
+                "original_price": original_price,
+                "adjusted_price": adjusted_price,
                 "adjustment_amount": difference,
-                "adjustment_reasoning": "Brief explanation of why this adjustment was made"
+                "adjustment_reasoning": "Brief reason"
             }}
-        ],
-        "overall_reasoning": "Summary of the adjustment methodology used"
+        ]
     }}
     """
     
@@ -144,39 +135,46 @@ async def adjust_comp_prices_for_condition_and_renovations(
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a professional real estate appraiser skilled at making precise property value adjustments based on condition and renovation differences."},
+                {"role": "system", "content": "You are a professional real estate appraiser. CRITICAL: When subject property has BETTER condition (Excellent > Good), the subject should be worth MORE than baseline comps, so INCREASE the prices. When subject has WORSE condition (Poor < Good), DECREASE the prices. When subject has FEWER renovations than baseline, DECREASE the prices."},
                 {"role": "user", "content": prompt},
             ],
             response_format={"type": "json_object"},
-            timeout=15,
+            timeout=100,
         )
         
         ai_result = _safe_json(response.choices[0].message.content, {"adjusted_comps": [], "overall_reasoning": "AI adjustment failed"})
         
-        # Apply the AI adjustments to the original comps
+        if not ai_result.get('adjusted_comps') or len(ai_result['adjusted_comps']) == 0:
+            return comps  # Return original if no valid adjustments
+        
         adjusted_comps = []
+        adjustment_applied = False
+        
         for i, comp in enumerate(comps):
             original_comp = comp.copy()
             
-            # Find the corresponding AI adjustment
             ai_adjustment = None
             if i < len(ai_result.get("adjusted_comps", [])):
                 ai_adjustment = ai_result["adjusted_comps"][i]
             
             if ai_adjustment and "adjusted_price" in ai_adjustment:
-                # Apply the AI-suggested price adjustment
-                original_comp["raw_price"] = ai_adjustment["adjusted_price"]
-                original_comp["ai_adjustment"] = {
-                    "original_price": ai_adjustment.get("original_price", comp.get("raw_price")),
-                    "adjusted_price": ai_adjustment["adjusted_price"],
-                    "adjustment_amount": ai_adjustment.get("adjustment_amount", 0),
-                    "reasoning": ai_adjustment.get("adjustment_reasoning", "AI price adjustment")
-                }
+                new_price = ai_adjustment["adjusted_price"]
+                if new_price != original_comp.get("raw_price"):
+                    original_comp["raw_price"] = new_price
+                    original_comp["ai_adjustment"] = {
+                        "original_price": ai_adjustment.get("original_price", comp.get("raw_price")),
+                        "adjusted_price": new_price,
+                        "adjustment_amount": ai_adjustment.get("adjustment_amount", 0),
+                        "reasoning": ai_adjustment.get("adjustment_reasoning", "AI price adjustment")
+                    }
+                    adjustment_applied = True
             
             adjusted_comps.append(original_comp)
         
-        print(f"[AI Adjustment] Successfully adjusted {len(adjusted_comps)} comps for condition: {subject_condition}, renovations: {subject_renovations}")
-        print(f"[AI Adjustment] Overall reasoning: {ai_result.get('overall_reasoning', 'N/A')}")
+        if not adjustment_applied:
+            return comps  # Return original comps if no changes were made
+        
+        print(f"[AI Adjustment] Successfully adjusted {len(adjusted_comps)} comps")
         
         return adjusted_comps
         

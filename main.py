@@ -654,17 +654,17 @@ async def cma_adjust(
     DEFAULT_RENOVATIONS = ["kitchen", "bath", "flooring", "roof", "windows"]
     
     # Use provided values or defaults
-    final_condition = condition or DEFAULT_CONDITION
+    final_condition = condition if condition is not None else DEFAULT_CONDITION
     
     if renovations is None:
-        final_renovations = DEFAULT_RENOVATIONS
+        final_renovations = DEFAULT_RENOVATIONS.copy()
     elif isinstance(renovations, list):
-        final_renovations = renovations
+        final_renovations = renovations.copy()
     elif isinstance(renovations, str):
         final_renovations = [r.strip() for r in renovations.split(',') if r.strip()]
     else:
         logger.warning(f"[CMA Adjust] Unknown renovations type: {type(renovations)}, using defaults")
-        final_renovations = DEFAULT_RENOVATIONS
+        final_renovations = DEFAULT_RENOVATIONS.copy()
     
     adjusted_subject_input = Subject(
         address=subject_prop.address,
@@ -891,8 +891,6 @@ async def cma_adjust(
     renovations_changed = set(final_renovations) != set(DEFAULT_RENOVATIONS)
     
     if condition_changed or renovations_changed:
-        logger.info(f"[CMA Adjust] Condition changed: {condition_changed} ('{final_condition}' vs '{DEFAULT_CONDITION}')")
-        logger.info(f"[CMA Adjust] Renovations changed: {renovations_changed} ({final_renovations} vs {DEFAULT_RENOVATIONS})")
         
         # Use OpenAI to adjust comp prices
         try:

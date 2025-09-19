@@ -109,10 +109,10 @@ async def adjust_comp_prices_for_condition_and_renovations(
     
     SPECIFIC ADJUSTMENTS:
     1. Condition: {subject_condition} vs {default_condition}
-       - Excellent > Good: ADD 10% 
+       - Excellent > Good: ADD 5% 
        - Good = Good: No change
-       - Fair < Good: SUBTRACT 7%
-       - Poor < Good: SUBTRACT 15%
+       - Fair < Good: SUBTRACT 5%
+       - Poor < Good: SUBTRACT 10%
     
     2. Missing renovations: {list(missing_renovations) if missing_renovations else 'none'}
        - Each missing renovation: SUBTRACT $15,000-30,000 depending on home value
